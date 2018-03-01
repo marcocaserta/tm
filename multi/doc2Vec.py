@@ -23,14 +23,25 @@
 
  Author: Marco Caserta (marco dot caserta at ie dot edu)
  Started : 02.02.2018
+ Updated : 27.02.2018
  Ended   :
 
  Command line options (see parseCommandLine):
--i inputfile
+-t type of distance computation approach used
+    -t 1 : doc2vec
+    -t 2 : WMD (word mover's distance)
+    -t 3 : type of clustering algorithm used (k.means)
 
 NOTE: This code is based on the tutorial from:
 
 https://github.com/RaRe-Technologies/gensim/blob/develop/docs/notebooks/doc2vec-lee.ipynb
+
+Branch ECCO:
+
+The idea is to work on the documents of the ECCO dataset at a sentence level.
+Given a "reference sentence," we want to find the list of sentences closer to
+the target in a given pool of sentences. Note that the dataset must be
+organized at a sentence level.
 
 """
 
@@ -41,18 +52,21 @@ import sys, getopt
 import cplex
 import os
 from os import path, listdir
+import csv
 import fnmatch
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 from timeit import default_timer as timer
+import math
 
 from gensim.models import doc2vec
 from gensim.models import Word2Vec
 from gensim.similarities import WmdSimilarity
 from gensim.corpora.dictionary import Dictionary
 
+from sklearn.metrics.pairwise import pairwise_distances
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn import metrics
@@ -82,9 +96,8 @@ pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2/"]
 #  pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2CLEANED/"]
 prefix = path.expanduser("~/gdrive/research/nlp/data/")
 
-inputfile    = ""
 distanceType = -1
-nCores = 4
+nCores       = 4
 
 
 class Clusters:
@@ -190,7 +203,7 @@ def parseCommandLine(argv):
 
 
 
-def readDocumentsNew(docs, baseName, prefix):
+def readDocumentsNew(docs, prefix):
     """
     Read press release files (all files in a folder).
     """
@@ -361,7 +374,7 @@ def applyDoc2Vec(docs):
     """
     
     if os.path.exists("doc2vec.model"):
-        print(">>> model was read from disk ")
+        print(">>> Doc2Vec model was read from disk ")
         model = doc2vec.Doc2Vec.load("doc2vec.model")
         return model
 
@@ -451,11 +464,11 @@ def trainingModel4wmd(corpus):
     """
     Training a model to be used in WMD.
     """
-    model = Word2Vec(corpus, workers = 4, size = 100, window = 300, min_count = 2, iter = 50)
-    #  model = Word2Vec(corpus)
+    model = Word2Vec(corpus, workers = nCores, size = 100, window = 300, min_count = 2, iter = 50)
 
     # use the following if we want to normalize the vectors
-    model.init_sims(replace=True)
+    # in this case, all vectors are converted to unit-legth
+    #  model.init_sims(replace=True)
 
     return model
 
@@ -464,14 +477,13 @@ def wmd4Docs(docs):
     """
     Use Word Mover's Distance for the entire corpus. We create a corpus based
     on (a subset of) the documents in docs. Next, we train the model using the
-    gensim function. The model is stored into "model"
+    gensim function. The model is stored into "model".
     """
 
-    if os.path.exists("similarityWMD.csv"):
+    if os.path.exists("11similarityWMD.csv"):
         print(" ... reading WMD matrix from disk ...")
         start = timer()
         vals = []
-        import csv
 
         reader = csv.reader(open("similarityWMD.csv", "r"), delimiter=",")
         x = list(reader)
@@ -479,23 +491,38 @@ def wmd4Docs(docs):
         print(" ... Done in {0:5.2f} seconds.\n".format(timer()-start))
         return vals
 
-    wmd_corpus = []
-    for doc in docs:
-        #  doc = nltkPreprocessing(doc) # already done outside
-        wmd_corpus.append(doc)
 
-    #  i = 0
-    #  for doc in wmd_corpus:
-    #      print(doc, " ---> doc ",i)
-    #      i += 1
+    if os.path.exists("word2vec.model"):
+        print(">>> Word2Vec model was read from disk ")
+        modelWord2Vec = Word2Vec.load("word2vec.model")
+    else:
 
-    print("## Building model for WMD .... ")
-    start = timer()
-    modelWord2Vec = trainingModel4wmd(wmd_corpus)
-    print("... Done in {0:5.2f} seconds.\n".format(timer()-start))
+        wmd_corpus = []
+        for doc in docs:
+            #  doc = nltkPreprocessing(doc) # already done outside
+            wmd_corpus.append(doc)
 
-    print ("## Computing distances using WMD (parallel version [p={0}])
+
+        print("## Building model for WMD .... ")
+        start = timer()
+        modelWord2Vec = trainingModel4wmd(wmd_corpus)
+        modelWord2Vec.save("word2vec.model")
+        print("... Done in {0:5.2f} seconds.\n".format(timer()-start))
+        print("         (Word2Vec model saved on disk - 'word2vec.model')")
+
+    print ("## Computing distances using WMD (parallel version [p={0}])\
     ...".format(nCores))
+
+    wmd_corpus = []
+    wmd_corpus.append("this is the first sentence")
+    wmd_corpus.append("this is the third sentence")
+    res = modelWord2Vec.wmdistance(wmd_corpus[0], wmd_corpus[1])
+    print("Result WMD = ", res)
+
+    #  getMostSimilarWMD(modelWord2Vec, [], [], 0)
+    transportationProblem(modelWord2Vec, [], [], [])
+    input("aka")
+
 
     nDocs = len(wmd_corpus)
     start = timer()
@@ -528,16 +555,49 @@ def wmd4Docs(docs):
     print("... Done in {0:5.2f} seconds.\n".format(timer()-start))
 
     # save matrix on disk
-
-    csvfile = "similarityWMD.csv"
-    import csv
+    csvfile = "similarityWMD.csv.temp"
     with open(csvfile, "w") as output:
         writer = csv.writer(output, lineterminator='\n')
         writer.writerows(vals)
 
     print("Word Mover's Distances written on disk file 'similarityWMD.csv' ")
+    input("aka")
     
     return vals
+
+def getMostSimilarWMD(model, corpus, target, nTop):
+    """
+    Using the word2vec "model", find in the corpus the nTop most similar
+    documents to target.
+
+    See: https://markroxor.github.io/gensim/static/notebooks/WMD_tutorial.html
+    """
+
+    target = "this is the target document sentence"
+    print(target, " ********")
+    target = nltkPreprocessing(target)
+    print(target, " ********")
+    nTop = 6
+    wmd_corpus = []
+    wmd_corpus.append("this is the first sentence")
+    wmd_corpus.append("this is the second sentence")
+    wmd_corpus.append("this is the third sentence")
+    wmd_corpus.append("this is the fourth sentence")
+    wmd_corpus.append("this is the fifth sentence")
+    wmd_corpus.append("this is the sixth sentence")
+
+    pre = []
+    for doc in wmd_corpus:
+        pre.append(nltkPreprocessing(doc))
+    print(pre)
+
+    instance = WmdSimilarity(pre, model, num_best=nTop)
+    sims = instance[target]
+    print('Query:', target)
+    for i in range(nTop):
+        print( 'sim = %.4f' % sims[i][1])
+        print(wmd_corpus[sims[i][0]])
+
 
 def bench_k_means(estimator, name, data):
     """
@@ -823,7 +883,216 @@ def create3dChart(centerCoord, pcaData, labels):
     plotly.offline.plot(fig, filename='PCA_Based_Clustering.html') 
 
 
+def transportationProblem(model, corpus, d1, d2):
 
+    from gensim.corpora import Dictionary
+    target= "bring demand capacity in line with line sales demand demand"
+
+    target = nltkPreprocessing(target)
+    print(target, " ********")
+    nTop = 6
+    wmd_corpus = []
+    wmd_corpus.append("reduce demand cost structure in order to improve our profitability")
+    wmd_corpus.append("this is the first document finance")
+    wmd_corpus.append("this is the second sentence")
+    wmd_corpus.append("this is the third sentence")
+    wmd_corpus.append("this is the fourth sentence")
+    wmd_corpus.append("this is the fifth sentence")
+    wmd_corpus.append("this is the sixth sentence")
+    pre = []
+    for doc in wmd_corpus:
+        pre.append(nltkPreprocessing(doc))
+
+
+    print("Sentences : ", pre[0], " AND ", target)
+    print("== == == OFFICIAL WMD = ", model.wmdistance(pre[0], target))
+
+    dctTarget = Dictionary([target])
+    d1 = pre[0]
+    dctd1 = Dictionary([d1])
+
+
+    print("supplier vs customer ", d1,  " ", target)
+    capacity = dctd1.doc2bow(d1)
+    demand = dctTarget.doc2bow(target)
+    print("LENGHTS ", len(capacity), " ... ", len(demand))
+
+    nS = len(capacity)
+    nD = len(demand)
+
+    print("S and D = ", capacity, " " , demand)
+    for i in range(nS):
+        print("v2 = ", dctd1[i], " = ", capacity[i][1])
+    print("*"*50)
+    for j in range(nD):
+        print("v2 = ", dctTarget[j], " = ", demand[j][1])
+
+
+    cap = np.array([capacity[i][1] for i in range(nS)])
+    cap = cap/sum(cap)
+    dem = np.array([demand[i][1] for i in range(nD)])
+    dem = dem/sum(dem)
+
+    print("Cap vector ", cap)
+    print("Dem vector ", dem)
+
+    # distances
+    S = [model.wv[dctd1[i]] for i in range(nS)]
+    D = [model.wv[dctTarget[i]] for i in range(nD)]
+    dd = pairwise_distances(S, D, metric="euclidean")
+    for i in range(nS):
+        print([dd[i][j] for j in range(nD)])
+
+    [z, xSol] = solveTransport(dd, cap, dem)
+    
+    indexMax = [np.argmax(xSol[i]) for i in range(nS)]
+    thickness = [xSol[i][indexMax[i]] for i in range(nS)]
+    indexMax = [indexMax[i] + nS for i in range(nS)]
+
+        
+    X = []
+    tt = []
+    for i in range(nS):
+        X.append(model.wv[dctd1[i]])
+        tt.append("doc")
+    for j in range(nD):
+        X.append(model.wv[dctTarget[j]])
+        tt.append("target")
+
+    seed = np.random.RandomState(seed=27)
+    mds = manifold.MDS(n_components = 2, metric = True, max_iter = 3000, eps =
+    1e-9, random_state = seed, dissimilarity = "euclidean", n_jobs = nCores)
+    sol = mds.fit(X).embedding_
+
+    #  print(sol)
+    #  df = pd.DataFrame({
+    #      "x1" : sol[:,0],
+    #      "x2" : sol[:,1],
+    #      "type"  : tt,
+    #      })
+    #  sns.lmplot("x1", "x2", data=df, hue="type", fit_reg=False)
+    #  sns.plt.savefig("mdsTry.png")
+
+
+    #  typesLabels = 2 # supplier and customer
+    colors = ["blue", "red", "green", "magenta"]
+    typesLabels = ["doc", "target"]
+    nPoints = len(X)
+    print("TT is = ", tt)
+    data = []
+
+    words = [dctd1[i] for i in range(nS)]
+    ids =[i for i in range(nPoints) if tt[i] == "doc"]
+    sizes = cap*100
+    trace = go.Scatter(x = sol[ids,0],
+                       y = sol[ids,1],
+                       showlegend = False,
+                       hoverinfo="skip",
+                       text = words,
+                       textposition = "bottom",
+                       mode = "text+markers",
+                       marker=dict(color="red",size=cap*100))
+    data.append(trace)
+    words = [dctTarget[i] for i in range(nD)]
+    ids = range(nS, nS+nD)
+    trace = go.Scatter(x = sol[ids,0],
+                       y = sol[ids,1],
+                       showlegend = False,
+                       text = words,
+                       textposition = "bottom",
+                       mode = "text+markers",
+                       marker=dict(color="blue",size=dem*100))
+    data.append(trace)
+    annotations = []
+    for i in range(nS):
+        annot = dict(x=sol[i,0],
+                     y=sol[i,1],
+                     xref = "x",
+                     yref = "y",
+                     text=round(thickness[i],2),
+                     ax = -20,
+                     ay = -20,
+                     #  ax = (sol[indexMax[i],0]-sol[i,0])*500,
+                     #  ay = (sol[indexMax[i],1]-sol[i,1])*500,
+                     showarrow=False)
+        annotations.append(annot)
+
+
+
+        trace = go.Scatter(x = [sol[i,0], sol[indexMax[i],0]],
+                           y = [sol[i,1], sol[indexMax[i],1]],
+                           showlegend = False,
+                           opacity = 0.25,
+                           mode="lines",
+                           text=round(thickness[i],2),
+                           #  textposition="top center",
+                           line=dict(color="red",width=thickness[i]*20))
+        data.append(trace)
+
+
+    layout = go.Layout(title="MDS of Two Sentences",
+    annotations = annotations,
+    xaxis = dict(zeroline=False),
+    yaxis = dict(zeroline=False))
+    fig = go.Figure(data=data, layout=layout)
+    plotly.offline.plot(fig)
+
+
+
+
+
+
+    exit(123)
+
+def solveTransport(matrixC, cap, dem):
+    
+    nS = len(cap)
+    nD = len(dem)
+    cpx = cplex.Cplex()
+    x_ilo = []
+    cpx.objective.set_sense(cpx.objective.sense.minimize)
+    for i in range(nS):
+        x_ilo.append([])
+        for j in range(nD):
+            x_ilo[i].append(cpx.variables.get_num())
+            varName = "x." + str(i) + "." + str(j)
+            cpx.variables.add(obj   = [float(matrixC[i][j])],
+                              lb    = [0.0],
+                              names = [varName])
+    # capacity constraint
+    for i in range(nS):
+        print("Capacity constraint supplier ", i, " ... rhs = ", cap[i] )
+        index = [x_ilo[i][j] for j in range(nD)]
+        value = [1.0]*nD
+        capacity_constraint = cplex.SparsePair(ind=index, val=value)
+        cpx.linear_constraints.add(lin_expr = [capacity_constraint],
+                                   senses   = ["L"],
+                                   rhs      = [cap[i]])
+
+    # demand constraints
+    #  for j in dctTarget:
+    for j in range(nD):
+        print("Demand constraint customer ", j, " ... rhs = ", dem[j])
+        index = [x_ilo[i][j] for i in range(nS)]
+        #  index = [x_ilo[i][j] for i in dctd1]
+        #  value = [1.0]*len(dctd1)
+        value = [1.0]*nS
+        demand_constraint = cplex.SparsePair(ind=index, val=value)
+        cpx.linear_constraints.add(lin_expr = [demand_constraint],
+                                   senses   = ["G"],
+                                   rhs      = [dem[j]])
+
+    cpx.solve()
+
+    z = cpx.solution.get_objective_value()
+
+    print("z* = ", z)
+    x_sol = []
+    for i in range(nS):
+        x_sol.append(cpx.solution.get_values(x_ilo[i]))
+        print([round(x_sol[i][j],2) for j in range(nD)])
+
+    return [z, x_sol]
 
 
 def main(argv):
@@ -848,11 +1117,13 @@ def main(argv):
     if os.path.exists("preprocessedDocs.txt"):
         print("\n\n>>> preprocessed docs read from disk (skipping preprocessing)")
         with open('preprocessedDocs.txt', 'r') as f:
-            docs = json.loads(f.read())
-        printSummary(docsAux)
+            docs = json.load(f)
+            corpus = docs[:]
+
+        printSummary(docs)
 
     else:
-        readDocumentsNew(docsAux, baseName, prefix)
+        readDocumentsNew(docsAux, prefix)
         printSummary(docsAux)
 
         print("## Init Document Preprocessing [p={0}] ...".format(nCores))
