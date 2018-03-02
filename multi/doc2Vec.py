@@ -63,6 +63,7 @@ import math
 
 from gensim.models import doc2vec
 from gensim.models import Word2Vec
+from gensim.models import KeyedVectors
 from gensim.similarities import WmdSimilarity
 from gensim.corpora.dictionary import Dictionary
 
@@ -86,6 +87,8 @@ from scipy.spatial.distance import pdist
 
 from collections import namedtuple
 
+from nltk import word_tokenize
+from nltk import sent_tokenize
 from nltk.corpus import stopwords
 from nltk import word_tokenize
 
@@ -95,8 +98,9 @@ pressrelease_folders = ["NEWS_RELEASE_v2/"]
 pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2/"]
 #  pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2CLEANED/"]
 prefix = path.expanduser("~/gdrive/research/nlp/data/")
+ecco_folders = ["ecco/ecco_portions/normed/96-00/"]
+vocab_folder = "google_vocab/"
 
-distanceType = -1
 nCores       = 4
 
 
@@ -178,11 +182,15 @@ class Clusters:
 def parseCommandLine(argv):
     global distanceType
     global inputfile
+    global targetFile 
+    targetFile = ""
+    distanceType = -1
     
     try:
-        opts, args = getopt.getopt(argv, "ht:i:", ["help","type=", "ifile="])
+        opts, args = getopt.getopt(argv, "ht:i:s:", ["help","type=", "ifile=",
+        "sentence="])
     except getopt.GetoptError:
-        print ("Usage : python doc2Vec.py -t <type> -i <inputfile> ")
+        print ("Usage : python doc2Vec.py -t <type> -s <sentence> ")
 
         sys.exit(2)
 
@@ -194,128 +202,127 @@ def parseCommandLine(argv):
             inputfile = arg
         elif opt in ("-t", "--type"):
             distanceType = arg
+        elif opt in ("-s", "--sentence"):
+            targetFile = arg
 
     if distanceType == -1:
         print("Error : Distance type not defined. Select one using -t : ")
         print("\t 1 : Cosine similarity (document-wise)")
         print("\t 2 : Word Mover's Distance (word-wise)")
         sys.exit(2)
+    if targetFile == "":
+        print("Error: Target sentence file not defined. Select one using -s\
+        <namefile>")
+        exit(2)
 
+def readTargetSentence(targetFile):
+    ff = open(targetFile)
+    target = ff.read()
+    ff.close()
+    return target
 
-
-def readDocumentsNew(docs, prefix):
-    """
-    Read press release files (all files in a folder).
-    """
-
-    fmap = open("mapping.txt", "w")
-
-
+def readEcco(prefix):
     i = -1
-    for folder in pressrelease_folders_txt:
+    docs = []
+    for folder in ecco_folders:
         i += 1
         fullpath = path.join(prefix, folder)
-        totFilesInFolder = len(fnmatch.filter(os.listdir(fullpath),
-        '*.txt'))
+        totFiles = len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
         countFiles = 0
         for f in listdir(path.join(prefix, folder)):
-            fmap.write("{0}\t {1:5d}\n".format(f, countFiles))
+            if f != "1780100800.clean.txt":
+                continue
+
             countFiles += 1
             fullname = fullpath + f
-            #  text = open(fullname).readlines()
             ff = open(fullname)
             docs.append(ff.read())
 
             print("{0:5d}/{1:5d} :: Reading file {2:10s} ".format(countFiles,
-            totFilesInFolder, f))
+            totFiles, f))
 
-            #  if countFiles > 4:
-                #  return
+    return docs
 
+def vocabularyBuilding(prefix):
+    '''
+    Build embeddings and vocabulary based on Google News set (1.5Gb and 3M
+    words and phrases based on 100B words from Google News)
+    '''
 
-    fmap.close()
+    global vocab_dict
 
-
-def readDocuments(docs, nDocs, baseName, nCompany, prefix):
-    # define docs organization
-    # docs 1 to 12 --> google --> "g"lt
-    # docs 13 to 18 --> apple --> "a"
-    # nCompany = [12, 6] --> number of documents for each company
-    # prefix = ["g", "a"]
-
-    index = []
-    index.append(nCompany[0])
-    for i in range(1,len(nCompany)):
-        index.append(index[i-1]+nCompany[i])
-
-    for c in range(len(nCompany)):
-        for i in range(1,nCompany[c]+1):
-            namefile = baseName + prefix[c] + str(i) + ".txt"
-            #  print("Reading file ", namefile, "\n")
-            f = open(namefile)
-            d = f.read()
-            docs.append(d)
+    # create dictionary first, using google list
+    fullpath = path.join(prefix, vocab_folder)
+    #  fullname = fullpath + "embed.dat"
+    namevocab = fullpath + "embed500.vocab"
+    with open(namevocab) as f:
+        vocab_list = map(str.strip, f.readlines())
+    vocab_dict = {w: k for k, w in enumerate(vocab_list)}
+    print("Vocabulary read from disk ... ")
 
 
-def printSummary(docs):
+    print("Reading model from disk ")
+    start = timer()
+    #  gPath = fullpath + "GoogleNews-vectors-negative300.bin.gz"
+    #  model = KeyedVectors.load_word2vec_format(gPath, binary=True,
+    #  limit=500000)
+    filename = fullpath + "embed500.model"
+    #  model = KeyedVectors.load(filename, mmap="r")
+    model = KeyedVectors.load(filename)
+    model.init_sims()
+    print("Done in ", timer()-start, " time")
+
+    return model
+
+
+
+
+def printSummary(docs, sentences):
+    from scipy import stats
+
+    lengths = np.array([len(sent) for sent in sentences])
+    qq = stats.mstats.mquantiles(lengths, prob=[0.0, 0.25, 0.50, 0.75, 1.10])
+
     print("\n\nmarco caserta (c) 2018 ")
     print("====================================================")
     print("Nr. Docs              : {0:>25d}".format(len(docs)))
-    print(" * Distance Type      : {0:>25s}".format(distanceType))
+    print("Nr. Sentences         : {0:>25d}".format(len(sentences)))
+    print("Avg. Length           : {0:>25.2f}".format(lengths.mean()))
+    print(" Min                  : {0:>25.2f}".format(qq[0]))
+    print(" Q1                   : {0:>25.2f}".format(qq[1]))
+    print(" Q2                   : {0:>25.2f}".format(qq[2]))
+    print(" Q3                   : {0:>25.2f}".format(qq[3]))
+    print(" Max                  : {0:>25.2f}".format(qq[4]))
+
+    print("\n * Distance Type      : {0:>25s}".format(distanceType))
     print("====================================================")
 
-    return
 
-
-    fig, axes = plt.subplots(nrows=1, ncols=3)
-
-
-    # get length distribution
-    byteCount   = []
-    wordCount   = []
-    for doc in docs:
-        byteCount.append(len(doc.encode("utf8")))
-        wordCount.append(len(doc.split()))
-
-    # statistics
-    meanComp  = np.mean(nCompany)
-    stdComp   = np.std(nCompany)
-    meanBytes = np.mean(byteCount)
-    meanWords = np.mean(wordCount)
-    stdBytes = np.std(byteCount)
-    stdWords = np.std(wordCount)
+    fig, axes = plt.subplots(nrows=1, ncols=1)
 
 
     df = pd.DataFrame({
-        "bytes": byteCount, 
-        "words": wordCount})
+        "words": lengths})
 
-    sns.barplot(x=prefix, y=nCompany, ax=axes[0])
-    axes[0].set(xlabel="Companies")
-    axes[0].set_title(r"[$\mu = $" +
-    str("{0:5.2f}".format(meanComp)) + " $\sigma = $" +
-    str("{0:5.2f}".format(stdComp)) + "]")
-
-    sns.distplot(df.bytes, hist_kws=dict(edgecolor="gray", linewidth=2),
-    hist=True, kde=False, rug=False, bins=10, ax=axes[1])
-    axes[1].set(xlabel="Bytes")
-    axes[1].set_title(r"[$\mu = $" +
-    str("{0:5.2f}".format(meanBytes)) + " $\sigma = $" +
-    str("{0:5.2f}".format(stdBytes)) + "]")
-
+    step_size = round((qq[4]-qq[0])/15)
+    bins = np.arange(start=qq[0], stop=qq[4]+1, step= step_size)
     sns.distplot(df.words, hist_kws=dict(edgecolor="gray", linewidth=2),
-    hist=True, kde=False, rug=False, bins=10, ax=axes[2])
-    axes[2].set(xlabel="Words")
-    axes[2].set_title(r"[$\mu = $" +
-    str("{0:5.2f}".format(meanWords)) + " $\sigma = $" +
-    str("{0:5.2f}".format(stdWords)) + "]")
-    sns.plt.suptitle("Distribution Plots")
+    hist=True, kde=False, rug=False, bins=bins, ax=axes)
+    axes.set(xticks=bins)
+    axes.set(xlabel="Nr. Words")
+    axes.set_title(r"[$\mu = $" +
+    str("{0:5.2f}".format(lengths.mean())) + " $\sigma = $" +
+    str("{0:5.2f}".format(lengths.std())) + "]")
+
+    sns.plt.suptitle("Distribution of Words Length")
     #  sns.plt.show()
     sns.plt.savefig("distributionPlots.png")
     print("Distribution Plots saved on disk ('distributionPlots.png')")
 
+    return
 
-def nltkPreprocessing(doc):
+
+def nltkPreprocessing(docs, sentences, doc):
     """
     Document preprocessing using NLTK:
     - tokenize document
@@ -324,10 +331,27 @@ def nltkPreprocessing(doc):
     - remove infrequent words
     """
 
-    doc = doc.lower()
+    #  doc = doc.lower()
+    sents = sent_tokenize(doc)
+    tokenized_sentence = []
+    i = 0
+    for ss in sents: # all the sentences in this document
+        words = [w.lower() for w in word_tokenize(ss)]
+        words = [w for w in words if w.isalpha() and w not in stop_words and w
+        in vocab_dict]
+        if len(words) > 1:
+            docs.append(words)
+            sentences.append([ss])
+            i += 1
+
+        #  if i > 100:
+        #      return
+
+def docPreprocessing(doc):
+
     doc = word_tokenize(doc)
-    doc = [w for w in doc if w not in stop_words] # remove stopwords
-    doc = [w for w in doc if w.isalpha()] # remove numbers and pkt
+    doc = [w.lower() for w in doc if w not in stop_words] # remove stopwords
+    doc = [w for w in doc if w.isalpha() and w in vocab_dict] # remove numbers and pkt
 
     return doc
 
@@ -373,7 +397,7 @@ def applyDoc2Vec(docs):
     > print(model.docvecs[document_tag_here]
     """
     
-    if os.path.exists("doc2vec.model"):
+    if os.path.exists("11doc2vec.model"):
         print(">>> Doc2Vec model was read from disk ")
         model = doc2vec.Doc2Vec.load("doc2vec.model")
         return model
@@ -387,7 +411,7 @@ def applyDoc2Vec(docs):
     #  print("Vocabulary was built : ", model.wv.vocab.keys(), " ----> this is a voc")
 
     # train the model
-    nrIters = 25
+    nrIters = 250
     #  model.train(docs, total_examples=model.corpus_count, epochs=model.iter)
     model.train(docs, total_examples=model.corpus_count, epochs=nrIters)
 
@@ -400,6 +424,17 @@ def applyDoc2Vec(docs):
     model.delete_temporary_training_data(keep_doctags_vectors=True, keep_inference=True)
 
     return model
+
+def compileSimilarityList(model, target, docs, N):
+    """
+    We want to create a list of the top N most similar sentences w.r.t. the
+    target sentence.
+    """
+
+    inferred_vector = model.infer_vector(target)
+    sims = model.docvecs.most_similar([inferred_vector], topn=N)
+
+    return sims
 
 
 def computeDocsSimilarities(model, docs):
@@ -467,13 +502,13 @@ def trainingModel4wmd(corpus):
     model = Word2Vec(corpus, workers = nCores, size = 100, window = 300, min_count = 2, iter = 50)
 
     # use the following if we want to normalize the vectors
-    # in this case, all vectors are converted to unit-legth
-    #  model.init_sims(replace=True)
+    # in this case, all vectors are converted to unit-length
+    model.init_sims(replace=True)
 
     return model
 
 
-def wmd4Docs(docs):
+def wmd4Docs(target, docs):
     """
     Use Word Mover's Distance for the entire corpus. We create a corpus based
     on (a subset of) the documents in docs. Next, we train the model using the
@@ -513,11 +548,9 @@ def wmd4Docs(docs):
     print ("## Computing distances using WMD (parallel version [p={0}])\
     ...".format(nCores))
 
-    wmd_corpus = []
-    wmd_corpus.append("this is the first sentence")
-    wmd_corpus.append("this is the third sentence")
-    res = modelWord2Vec.wmdistance(wmd_corpus[0], wmd_corpus[1])
-    print("Result WMD = ", res)
+    for i in range(len(wmd_corpus)):
+        res = modelWord2Vec.wmdistance(target, wmd_corpus[i])
+        print("Result WMD = ", res)
 
     #  getMostSimilarWMD(modelWord2Vec, [], [], 0)
     transportationProblem(modelWord2Vec, [], [], [])
@@ -964,17 +997,7 @@ def transportationProblem(model, corpus, d1, d2):
     1e-9, random_state = seed, dissimilarity = "euclidean", n_jobs = nCores)
     sol = mds.fit(X).embedding_
 
-    #  print(sol)
-    #  df = pd.DataFrame({
-    #      "x1" : sol[:,0],
-    #      "x2" : sol[:,1],
-    #      "type"  : tt,
-    #      })
-    #  sns.lmplot("x1", "x2", data=df, hue="type", fit_reg=False)
-    #  sns.plt.savefig("mdsTry.png")
 
-
-    #  typesLabels = 2 # supplier and customer
     colors = ["blue", "red", "green", "magenta"]
     typesLabels = ["doc", "target"]
     nPoints = len(X)
@@ -1102,41 +1125,54 @@ def main(argv):
 
     myClusters = Clusters()
 
-    #  baseName   = "../examples2/txt/"
-    #  nDocs      = sum(nCompany)
-    #  prefix   = ["g", "a"]
-    #  readDocuments(docsAux, nDocs, baseName, nCompany, prefix)
-    #  nCompany   = [12, 6]
     docsAux    = [] #  the original documents, as read from disk
     docs       = [] #  the documents in format required by doc2vec
     corpus     = [] #  the documents after preprocessing (not fit for doc2vec)
     distMatrix = [] #  the distance matrix used by hierarchical clustering
 
     parseCommandLine(argv)
+    
+    target = readTargetSentence(targetFile)
+    print("Target sentence : ", target)
 
-    if os.path.exists("preprocessedDocs.txt"):
-        print("\n\n>>> preprocessed docs read from disk (skipping preprocessing)")
-        with open('preprocessedDocs.txt', 'r') as f:
+    vocabularyBuilding(prefix)
+
+    targetTokenized = docPreprocessing(target)
+    print("Now: ", targetTokenized)
+
+    if os.path.exists("11preprocessedSentences.txt"):
+        print("\n\n>>> preprocessed sentences read from disk (skipping preprocessing)")
+        with open('preprocessedSentences.txt', 'r') as f:
             docs = json.load(f)
             corpus = docs[:]
 
         printSummary(docs)
 
     else:
-        readDocumentsNew(docsAux, prefix)
-        printSummary(docsAux)
+        docsAux = readEcco(prefix)
 
         print("## Init Document Preprocessing [p={0}] ...".format(nCores))
         start  = timer()
-        p      = Pool(nCores)
-        docs   = p.map(nltkPreprocessing, docsAux)
-        corpus = docs[:]
-        p.close()
-        p.join()
+        #  p      = Pool(nCores)
+        #  docs   = p.starmap(nltkPreprocessing, docs, sentences, docsAux))
+        #  printSummary(docs)
+        #  corpus = docs[:]
+        #  p.close()
+        #  p.join()
+        for doc in docsAux:
+            nltkPreprocessing(docs, corpus, doc)
+
+        fsentences = open("corpusSentences.txt", "w")
+        for i in range(len(corpus)):
+            fsentences.write("{0} \t {1}\n".format(i, corpus[i]))
+        fsentences.close()
+
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
-        with open('preprocessedDocs.txt', 'w') as outfile:
+        with open('preprocessedSentences.txt', 'w') as outfile:
             json.dump(docs, outfile)
+
+    printSummary(docsAux, docs)
 
     print("## Init Document Transformation for Doc2Vec...")
     start = timer()
@@ -1148,7 +1184,16 @@ def main(argv):
     start = timer()
     modelDoc2Vec = applyDoc2Vec(docs)
     print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+    
+    similarityList = compileSimilarityList(modelDoc2Vec, targetTokenized, docs, 5)
+    print("Target sentence : ", target)
+    print("="*80)
+    for i,j in similarityList:
+        ss = ", ".join( repr(e) for e in corpus[i] )
+        print("s[{0:5d}] = {1:5.2f} :: {2}".format(i, j, ss))
+        print("="*80)
 
+    exit(111)
     # REM: If we want to use WMD, we need to use a model that creates vectors
     #  for individual words. If we want to use doc2vec, then the vector is per
     # document, not per word. These are two different models!
@@ -1168,7 +1213,7 @@ def main(argv):
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
     elif distanceType == "2":
         print("## Computing docs similarity using WMD ...")
-        distMatrix = wmd4Docs(corpus)
+        distMatrix = wmd4Docs(target, corpus)
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
         
 
@@ -1182,11 +1227,6 @@ def main(argv):
     myClusters.updateClusterInfo()
     myClusters.createSetsFromLabels()
     myClusters.printSets()
-
-    # This uses Principal Component Analysis
-    #  pcaData = get3dPCA(modelDoc2Vec.docvecs)
-    #  myClusters.computeCenters3d(pcaData)
-    #  create3dChart(myClusters.centers, pcaData, myClusters.labels)
 
     # This uses Multidimensional Scaling (works only if distMatrix is
     # symmetric)
