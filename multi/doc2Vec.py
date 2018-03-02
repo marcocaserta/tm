@@ -100,8 +100,10 @@ pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2/"]
 prefix = path.expanduser("~/gdrive/research/nlp/data/")
 ecco_folders = ["ecco/ecco_portions/normed/96-00/"]
 vocab_folder = "google_vocab/"
+#  ecco_folders = ["/home/marco/gdrive/research/nlp/data/temp/"]
 
 nCores       = 4
+totFiles     = -1
 
 
 class Clusters:
@@ -221,27 +223,101 @@ def readTargetSentence(targetFile):
     ff.close()
     return target
 
-def readEcco(prefix):
+def listOfFiles():
+    
     i = -1
-    docs = []
+    fullList = []
     for folder in ecco_folders:
         i += 1
         fullpath = path.join(prefix, folder)
         totFiles = len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
         countFiles = 0
         for f in listdir(path.join(prefix, folder)):
-            if f != "1780100800.clean.txt":
-                continue
+            #  if f != "1780100800.clean.txt":
+                #  continue
+
+            countFiles += 1
+            fullname = fullpath + f
+            fullList.append(fullname)
+
+            if countFiles > 3:
+                break
+
+    return fullList, totFiles
+
+def readEccoParallel(namefile):
+
+    print("Reading ", namefile)
+    docs = []
+    sentences = []
+    countFiles = 0
+    ff = open(namefile)
+    sents = sent_tokenize(ff.read())
+    for sent in sents:
+        words = [w.lower() for w in word_tokenize(sent)]
+        words = [w for w in words if w.isalpha() and w not in stop_words]
+        if len(words) > 2:
+            docs.append(words)
+            sentences.append([sent])
+    print("Returning :", docs, " AND ", sentences)
+    return zip(*docs, *sentences)
+
+def readEcco():
+
+
+    i = -1
+    docs = []
+    sentences = []
+    totFiles = 0
+    for folder in ecco_folders:
+        i += 1
+        fullpath = path.join(prefix, folder)
+        totFiles += len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
+        countFiles = 0
+        for f in listdir(path.join(prefix, folder)):
+            #  if f != "1780100800.clean.txt":
+                #  continue
 
             countFiles += 1
             fullname = fullpath + f
             ff = open(fullname)
-            docs.append(ff.read())
+            sents = sent_tokenize(ff.read())
+            for sent in sents:
+                words = [w.lower() for w in word_tokenize(sent)]
+                words = [w for w in words if w.isalpha() and w not in stop_words]
+                if len(words) > 2:
+                    docs.append(words)
+                    sentences.append([sent])
 
             print("{0:5d}/{1:5d} :: Reading file {2:10s} ".format(countFiles,
             totFiles, f))
+            if countFiles > 10:
+                break
 
-    return docs
+    return docs, sentences, totFiles
+
+
+#  def readEcco(prefix):
+#      i = -1
+#      docs = []
+#      for folder in ecco_folders:
+#          i += 1
+#          fullpath = path.join(prefix, folder)
+#          totFiles = len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
+#          countFiles = 0
+#          for f in listdir(path.join(prefix, folder)):
+#              if f != "1780100800.clean.txt":
+#                  continue
+#
+#              countFiles += 1
+#              fullname = fullpath + f
+#              ff = open(fullname)
+#              docs.append(ff.read())
+#
+#              print("{0:5d}/{1:5d} :: Reading file {2:10s} ".format(countFiles,
+#              totFiles, f))
+#
+#      return docs
 
 def vocabularyBuilding(prefix):
     '''
@@ -261,32 +337,33 @@ def vocabularyBuilding(prefix):
     print("Vocabulary read from disk ... ")
 
 
-    print("Reading model from disk ")
-    start = timer()
-    #  gPath = fullpath + "GoogleNews-vectors-negative300.bin.gz"
-    #  model = KeyedVectors.load_word2vec_format(gPath, binary=True,
-    #  limit=500000)
-    filename = fullpath + "embed500.model"
-    #  model = KeyedVectors.load(filename, mmap="r")
-    model = KeyedVectors.load(filename)
-    model.init_sims()
-    print("Done in ", timer()-start, " time")
+    #  print("Reading model from disk ")
+    #  start = timer()
+    #  #  gPath = fullpath + "GoogleNews-vectors-negative300.bin.gz"
+    #  #  model = KeyedVectors.load_word2vec_format(gPath, binary=True,
+    #  #  limit=500000)
+    #  filename = fullpath + "embed500.model"
+    #  #  model = KeyedVectors.load(filename, mmap="r")
+    #  model = KeyedVectors.load(filename)
+    #  model.init_sims()
+    #  print("Done in ", timer()-start, " time")
 
-    return model
-
-
+    #  return model
 
 
-def printSummary(docs, sentences):
+
+
+def printSummary(totFiles, docs):
     from scipy import stats
 
-    lengths = np.array([len(sent) for sent in sentences])
+    lengths = np.array([len(sent) for sent in docs])
     qq = stats.mstats.mquantiles(lengths, prob=[0.0, 0.25, 0.50, 0.75, 1.10])
 
+    print("====================================================")
     print("\n\nmarco caserta (c) 2018 ")
     print("====================================================")
-    print("Nr. Docs              : {0:>25d}".format(len(docs)))
-    print("Nr. Sentences         : {0:>25d}".format(len(sentences)))
+    print("Nr. Files             : {0:>25d}".format(totFiles))
+    print("Nr. Sentences         : {0:>25d}".format(len(docs)))
     print("Avg. Length           : {0:>25.2f}".format(lengths.mean()))
     print(" Min                  : {0:>25.2f}".format(qq[0]))
     print(" Q1                   : {0:>25.2f}".format(qq[1]))
@@ -297,6 +374,8 @@ def printSummary(docs, sentences):
     print("\n * Distance Type      : {0:>25s}".format(distanceType))
     print("====================================================")
 
+
+    return
 
     fig, axes = plt.subplots(nrows=1, ncols=1)
 
@@ -333,24 +412,24 @@ def nltkPreprocessing(docs, sentences, doc):
 
     #  doc = doc.lower()
     sents = sent_tokenize(doc)
-    tokenized_sentence = []
     i = 0
     for ss in sents: # all the sentences in this document
         words = [w.lower() for w in word_tokenize(ss)]
-        words = [w for w in words if w.isalpha() and w not in stop_words and w
-        in vocab_dict]
-        if len(words) > 1:
+        #  words = [w for w in words if w.isalpha() and w not in stop_words and w
+        #  in vocab_dict]
+        words = [w for w in words if w.isalpha() and w not in stop_words]
+        if len(words) > 2:
             docs.append(words)
             sentences.append([ss])
             i += 1
 
-        #  if i > 100:
-        #      return
+        if i > 10:
+            return
 
 def docPreprocessing(doc):
 
     doc = word_tokenize(doc)
-    doc = [w.lower() for w in doc if w not in stop_words] # remove stopwords
+    doc = [w.lower() for w in doc if w.lower() not in stop_words] # remove stopwords
     doc = [w for w in doc if w.isalpha() and w in vocab_dict] # remove numbers and pkt
 
     return doc
@@ -411,9 +490,7 @@ def applyDoc2Vec(docs):
     #  print("Vocabulary was built : ", model.wv.vocab.keys(), " ----> this is a voc")
 
     # train the model
-    nrIters = 250
-    #  model.train(docs, total_examples=model.corpus_count, epochs=model.iter)
-    model.train(docs, total_examples=model.corpus_count, epochs=nrIters)
+    model.train(docs, total_examples=model.corpus_count, epochs=model.iter)
 
     # if we want to save the model on disk (to reuse it later on without
     # training)
@@ -425,7 +502,7 @@ def applyDoc2Vec(docs):
 
     return model
 
-def compileSimilarityList(model, target, docs, N):
+def compileDoc2VecSimilarityList(model, target, docs, N):
     """
     We want to create a list of the top N most similar sentences w.r.t. the
     target sentence.
@@ -498,8 +575,20 @@ def computeDocsSimilarities(model, docs):
 def trainingModel4wmd(corpus):
     """
     Training a model to be used in WMD.
+
+    Settings:
+    - hs = 0: Do not use hiercarchical softmax, but negative sampling
+    - negative > 0 : number of negative words to be used in negative sampling
+    - sorted_vocab : the most frequent words come first (we can trim it)
+
     """
-    model = Word2Vec(corpus, workers = nCores, size = 100, window = 300, min_count = 2, iter = 50)
+    model = Word2Vec(workers = nCores, size = 100, window = 300,
+    min_count = 2, hs=0, negative= 15, iter = 100, sorted_vocab=1)
+    # build vocabulary based on the corpus
+    model.build_vocab(corpus)
+
+    model.train(corpus, total_examples=model.corpus_count,
+    epochs=model.iter) 
 
     # use the following if we want to normalize the vectors
     # in this case, all vectors are converted to unit-length
@@ -513,6 +602,11 @@ def wmd4Docs(target, docs):
     Use Word Mover's Distance for the entire corpus. We create a corpus based
     on (a subset of) the documents in docs. Next, we train the model using the
     gensim function. The model is stored into "model".
+
+    NOTE: In this version, we do now use a pre-processing for this phase. We
+    take the unprocessed corpus and create a Word2Vec model from there. Then,
+    depending on the max_count threshold used, we migth have to eliminate some
+    words from the corpus, if we use the Transportation problem.
     """
 
     if os.path.exists("11similarityWMD.csv"):
@@ -532,6 +626,7 @@ def wmd4Docs(target, docs):
         modelWord2Vec = Word2Vec.load("word2vec.model")
     else:
 
+        # extra step to eliminate some of the sentences from the corpus
         wmd_corpus = []
         for doc in docs:
             #  doc = nltkPreprocessing(doc) # already done outside
@@ -606,30 +701,16 @@ def getMostSimilarWMD(model, corpus, target, nTop):
     See: https://markroxor.github.io/gensim/static/notebooks/WMD_tutorial.html
     """
 
-    target = "this is the target document sentence"
-    print(target, " ********")
-    target = nltkPreprocessing(target)
-    print(target, " ********")
-    nTop = 6
-    wmd_corpus = []
-    wmd_corpus.append("this is the first sentence")
-    wmd_corpus.append("this is the second sentence")
-    wmd_corpus.append("this is the third sentence")
-    wmd_corpus.append("this is the fourth sentence")
-    wmd_corpus.append("this is the fifth sentence")
-    wmd_corpus.append("this is the sixth sentence")
-
-    pre = []
-    for doc in wmd_corpus:
-        pre.append(nltkPreprocessing(doc))
-    print(pre)
-
-    instance = WmdSimilarity(pre, model, num_best=nTop)
+    instance = WmdSimilarity(corpus, model, num_best=nTop)
     sims = instance[target]
-    print('Query:', target)
-    for i in range(nTop):
-        print( 'sim = %.4f' % sims[i][1])
-        print(wmd_corpus[sims[i][0]])
+    #  print('Query:', target)
+    #  print("="*80)
+    #  for i in range(nTop):
+    #      print( 'sim = %.4f' % sims[i][1])
+    #      print(corpus[sims[i][0]])
+    #      print("="*80)
+
+    return sims
 
 
 def bench_k_means(estimator, name, data):
@@ -703,67 +784,6 @@ def clustering(model, docs, chartType=0):
     elif chartType == "3d":
         create3dChart2(centers, pcaData, kmeans.labels_)
     
-
-def affinityPropagation(model, docs):
-    """
-    This is used to get an idea of the number of clusters that should be
-    created. It might be a preliminary step to cluster analysis.
-    Note that it is possible to establish the relative importance of each
-    point in the dataset.
-    """
-
-    nDocs = len(docs)
-    pcaData = PCA(n_components = 2).fit_transform(model.docvecs)
-    df = pd.DataFrame({
-        "id": range(nDocs),
-        "x1": pcaData[:,0],
-        "x2": pcaData[:,1]})
-
-    af = AffinityPropagation(affinity="euclidean",
-    damping=0.9,convergence_iter=1000,verbose=True).fit(pcaData)
-    cluster_centers_indices = af.cluster_centers_indices_
-    labels = af.labels_
-    n_clusters_ = len(cluster_centers_indices)
-
-    print('Estimated number of clusters: %d' % n_clusters_)
-    print("Labels = ", labels)
-
-    colors = ['blue','green','red','cyan','magenta']
-    data = []
-    for k, col in zip(range(n_clusters_), colors):
-        class_members = labels == k
-        ids = [i for i in range(nDocs) if class_members[i] == True]
-        cluster_center = pcaData[cluster_centers_indices[k], :]
-        trace1 = go.Scatter(x=pcaData[class_members, 0], 
-                            y=pcaData[class_members, 1],
-                            showlegend=False,
-                            text = ids,
-                            textposition = "bottom",
-                            mode='text+markers', marker=dict(color=col,
-                                                       size=10))
-        
-        trace2 = go.Scatter(x=[cluster_center[0]], 
-                            y=[cluster_center[1]], 
-                            showlegend=False,
-                            mode='markers', marker=dict(color=col,
-                                                        size=14))
-        data.append(trace1)
-        data.append(trace2)
-        for x in pcaData[class_members]:
-            trace3 = go.Scatter(x = [cluster_center[0], x[0]], 
-                                y=[cluster_center[1], x[1]],
-                                showlegend=False,
-                                opacity=0.25,
-                                mode='lines', line=dict(color=col,
-                                                        width=2))
-            data.append(trace3)
-
-    layout = go.Layout(title='Estimated number of clusters: %d' % n_clusters_,
-                       xaxis=dict(zeroline=False),
-                       yaxis=dict(zeroline=False))
-    fig = go.Figure(data=data, layout=layout)
-
-    plotly.offline.plot(fig)
 
 def getClustersFromLabels(labels):
 
@@ -916,37 +936,19 @@ def create3dChart(centerCoord, pcaData, labels):
     plotly.offline.plot(fig, filename='PCA_Based_Clustering.html') 
 
 
-def transportationProblem(model, corpus, d1, d2):
+def transportationProblem(model, target, source):
 
     from gensim.corpora import Dictionary
-    target= "bring demand capacity in line with line sales demand demand"
+    print("TARGET : ", target)
+    print("SOURCE : ", source)
 
-    target = nltkPreprocessing(target)
-    print(target, " ********")
-    nTop = 6
-    wmd_corpus = []
-    wmd_corpus.append("reduce demand cost structure in order to improve our profitability")
-    wmd_corpus.append("this is the first document finance")
-    wmd_corpus.append("this is the second sentence")
-    wmd_corpus.append("this is the third sentence")
-    wmd_corpus.append("this is the fourth sentence")
-    wmd_corpus.append("this is the fifth sentence")
-    wmd_corpus.append("this is the sixth sentence")
-    pre = []
-    for doc in wmd_corpus:
-        pre.append(nltkPreprocessing(doc))
-
-
-    print("Sentences : ", pre[0], " AND ", target)
-    print("== == == OFFICIAL WMD = ", model.wmdistance(pre[0], target))
+    print("== == == OFFICIAL WMD = ", model.wmdistance(source, target))
 
     dctTarget = Dictionary([target])
-    d1 = pre[0]
-    dctd1 = Dictionary([d1])
+    dctd1 = Dictionary([source])
 
 
-    print("supplier vs customer ", d1,  " ", target)
-    capacity = dctd1.doc2bow(d1)
+    capacity = dctd1.doc2bow(source)
     demand = dctTarget.doc2bow(target)
     print("LENGHTS ", len(capacity), " ... ", len(demand))
 
@@ -1061,12 +1063,6 @@ def transportationProblem(model, corpus, d1, d2):
     plotly.offline.plot(fig)
 
 
-
-
-
-
-    exit(123)
-
 def solveTransport(matrixC, cap, dem):
     
     nS = len(cap)
@@ -1117,6 +1113,70 @@ def solveTransport(matrixC, cap, dem):
 
     return [z, x_sol]
 
+def createWord2VecModel(docs):
+
+    if os.path.exists("word2vec.model"):
+        print(">>> Word2Vec model was read from disk ")
+        modelWord2Vec = Word2Vec.load("word2vec.model")
+    else:
+
+
+        print("## Building word2vec model for WMD ...")
+        start = timer()
+        modelWord2Vec = trainingModel4wmd(docs)
+        modelWord2Vec.save("word2vec.model")
+        print("... Done in {0:5.2f} seconds.\n".format(timer()-start))
+        print("         (Word2Vec model saved on disk - 'word2vec.model')")
+
+    return modelWord2Vec
+
+def cleanCorpus(modelWord2Vec, docs, corpus):
+
+    if len(docs) != len(corpus):
+        print("ERROR : Two different lengths in original and preprocessed docs")
+        exit(123)
+
+    count = 0
+    newDocs = []
+    newCorpus = []
+    for i in range(len(docs)):
+            ss = [w for w in docs[i] if w in modelWord2Vec.wv.vocab]
+            if len(ss) > 2:
+                newDocs.append(ss)
+                newCorpus.append(corpus[i])
+            else:
+                count += 1
+
+    print("** ** From cleaning phase, eliminated ", count, " docs ")
+    return newDocs, newCorpus
+
+
+
+def compileWMDSimilarityList(modelWord2Vec, target, docs, N):
+    """
+    Returns a list of the top N most similar sentences w.r.t. the target
+    sentence, using the Word Mover's Distance method.
+    """
+
+
+    print ("## Computing distances using WMD (parallel version [p={0}])\
+    ...".format(nCores))
+
+    sims = getMostSimilarWMD(modelWord2Vec, docs, target, 5)
+
+    # NOTE: The corpus now needs to be re-processed, since when we use the
+    # transportation model below, we need to get the word2vec representation of
+    # every word. If, in training, min_count > 1, some of the words in the
+    # preprocessed corpus might not be in the vocabulary produced by word2vec,
+    # even though they were in the vocabulary produced by google.
+
+
+    # source : the origin, the document we want to transform into the target
+    source = docs[sims[2][0]]
+    transportationProblem(modelWord2Vec, target, source)
+
+    return sims 
+    
 
 def main(argv):
     '''
@@ -1131,80 +1191,97 @@ def main(argv):
     distMatrix = [] #  the distance matrix used by hierarchical clustering
 
     parseCommandLine(argv)
+    vocabularyBuilding(prefix)
     
     target = readTargetSentence(targetFile)
-    print("Target sentence : ", target)
-
-    vocabularyBuilding(prefix)
-
     targetTokenized = docPreprocessing(target)
-    print("Now: ", targetTokenized)
 
-    if os.path.exists("11preprocessedSentences.txt"):
-        print("\n\n>>> preprocessed sentences read from disk (skipping preprocessing)")
+    if os.path.exists("preprocessedSentences.txt"):
+        print("\n\n>>> Preprocessed sentences read from disk (skipping preprocessing)")
         with open('preprocessedSentences.txt', 'r') as f:
             docs = json.load(f)
-            corpus = docs[:]
+        with open('fullSentences.txt', 'r') as f:
+            corpus = json.load(f)
 
-        printSummary(docs)
+        printSummary(-1, docs)
 
     else:
-        docsAux = readEcco(prefix)
-
-        print("## Init Document Preprocessing [p={0}] ...".format(nCores))
+        print("## Reading and Preprocessing ECCO files [p={0}] ...".format(nCores))
         start  = timer()
+        #  docsAux = readEcco(prefix)
+        docs, corpus, totFiles = readEcco()
+        #  fullList, totFiles = listOfFiles()
+        #  print("Totfiles = ", totFiles)
         #  p      = Pool(nCores)
-        #  docs   = p.starmap(nltkPreprocessing, docs, sentences, docsAux))
-        #  printSummary(docs)
-        #  corpus = docs[:]
+        #  res = p.map(readEccoParallel, fullList)
+        #  #  corpus = docs[:]
         #  p.close()
         #  p.join()
-        for doc in docsAux:
-            nltkPreprocessing(docs, corpus, doc)
+        #  for i in range(len(list(res))):
+        #      print("Text ", i, " = ", list(res[i]))
+        #  print(docs)
 
+        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
+        print("## Writing sentences to disk ...")
+        start = timer()
         fsentences = open("corpusSentences.txt", "w")
         for i in range(len(corpus)):
             fsentences.write("{0} \t {1}\n".format(i, corpus[i]))
         fsentences.close()
 
-        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
-
+        with open('fullSentences.txt', 'w') as outfile:
+            json.dump(corpus, outfile)
         with open('preprocessedSentences.txt', 'w') as outfile:
             json.dump(docs, outfile)
+        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
-    printSummary(docsAux, docs)
 
-    print("## Init Document Transformation for Doc2Vec...")
-    start = timer()
-    # add tags to documents (required by doc2vec)
-    docs = transform4Doc2Vec(docs) 
-    print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+        printSummary(totFiles, docs)
 
-    print("## Init Doc2Vec Model Creation ...")
-    start = timer()
-    modelDoc2Vec = applyDoc2Vec(docs)
-    print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
-    
-    similarityList = compileSimilarityList(modelDoc2Vec, targetTokenized, docs, 5)
-    print("Target sentence : ", target)
-    print("="*80)
-    for i,j in similarityList:
-        ss = ", ".join( repr(e) for e in corpus[i] )
-        print("s[{0:5d}] = {1:5.2f} :: {2}".format(i, j, ss))
+    docToVec = False
+    if docToVec == True:
+        print("## Init Document Transformation for Doc2Vec...")
+        start = timer()
+        # add tags to documents (required by doc2vec)
+        docs = transform4Doc2Vec(docs) 
+        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
+        print("## Init Doc2Vec Model Creation ...")
+        start = timer()
+        modelDoc2Vec = applyDoc2Vec(docs)
+        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+        
+        similarityList = compileDoc2VecSimilarityList(modelDoc2Vec, targetTokenized, docs, 5)
+        print("Target sentence : ", target)
         print("="*80)
+        for i,j in similarityList:
+            ss = ", ".join( repr(e) for e in corpus[i] )
+            print("s[{0:5d}] = {1:5.2f} :: {2}".format(i, j, ss))
+            print("="*80)
 
-    exit(111)
-    # REM: If we want to use WMD, we need to use a model that creates vectors
-    #  for individual words. If we want to use doc2vec, then the vector is per
-    # document, not per word. These are two different models!
+        exit(111)
 
-    # Thus, wmd works on the corpus, to which only base preprocessing has
-    # been applied (tokenization, punctuation, etc.) 
-    # Every technique based on document distances, e.g., cosine similariy,
-    # requires the use of doc2vec which, in turn, requires a further
-    # transformation of the documents. All the doc2vec operations are applied
-    # on docs, rather than on corpus.
+    wmd = True
+    if wmd == True:
+        modelWord2Vec = createWord2VecModel(docs)
 
+        # one the vocabulary is build, we reprocess the entire corpus
+        docs, corpus = cleanCorpus(modelWord2Vec, docs, corpus)
+        # find top N most similar sentences to target
+        similarityList = compileWMDSimilarityList(modelWord2Vec,
+        targetTokenized, docs, 5)
+
+        print("Target sentence : ", target)
+        print("="*80)
+        for i in range(5):
+            idDoc = similarityList[i][0]
+            score = similarityList[i][1]
+            ss = ", ".join( repr(e) for e in corpus[idDoc] )
+            print("s[{0:5d}] = {1:5.2f} :: {2}".format(idDoc, score, ss))
+            print("="*80)
+
+    exit(123)
     
     if distanceType == "1":
         print("## Computing docs similarity using doc2vec...")
