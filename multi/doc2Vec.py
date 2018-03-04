@@ -76,9 +76,6 @@ import plotly
 import plotly.plotly as py
 import plotly.graph_objs as go
 
-#  from sklearn.cluster import AffinityPropagation
-#  from sklearn.datasets import load_digits
-
 import scipy.spatial.distance as ssd
 from scipy.cluster.hierarchy import dendrogram, linkage
 from scipy.cluster.hierarchy import cophenet
@@ -90,7 +87,6 @@ from collections import namedtuple
 from nltk import word_tokenize
 from nltk import sent_tokenize
 from nltk.corpus import stopwords
-from nltk import word_tokenize
 
 stop_words = stopwords.words("english")
 
@@ -104,7 +100,7 @@ vocab_folder = "google_vocab/"
 
 nCores       = 4
 totFiles     = -1
-
+nTop         = 5
 
 class Clusters:
     """
@@ -284,14 +280,15 @@ def readEcco():
             sents = sent_tokenize(ff.read())
             for sent in sents:
                 words = [w.lower() for w in word_tokenize(sent)]
-                words = [w for w in words if w.isalpha() and w not in stop_words]
+                words = [w for w in words if w.isalpha() and w not in
+                stop_words and w in vocab_dict]
                 if len(words) > 2:
                     docs.append(words)
                     sentences.append([sent])
 
             print("{0:5d}/{1:5d} :: Reading file {2:10s} ".format(countFiles,
             totFiles, f))
-            if countFiles > 10:
+            if countFiles > 1:
                 break
 
     return docs, sentences, totFiles
@@ -698,10 +695,14 @@ def getMostSimilarWMD(model, corpus, target, nTop):
     Using the word2vec "model", find in the corpus the nTop most similar
     documents to target.
 
+    NOTE: WmdSimilarity() provide the "negative" of wmdistance(), i.e.:
+    sim(d1,d2) = 1/(1+wmdistance(d1,d2)).
+
     See: https://markroxor.github.io/gensim/static/notebooks/WMD_tutorial.html
     """
 
     instance = WmdSimilarity(corpus, model, num_best=nTop)
+    instance.num_best = nTop
     sims = instance[target]
     #  print('Query:', target)
     #  print("="*80)
@@ -939,53 +940,42 @@ def create3dChart(centerCoord, pcaData, labels):
 def transportationProblem(model, target, source):
 
     from gensim.corpora import Dictionary
-    print("TARGET : ", target)
-    print("SOURCE : ", source)
 
     print("== == == OFFICIAL WMD = ", model.wmdistance(source, target))
 
     dctTarget = Dictionary([target])
-    dctd1 = Dictionary([source])
-
-
-    capacity = dctd1.doc2bow(source)
-    demand = dctTarget.doc2bow(target)
-    print("LENGHTS ", len(capacity), " ... ", len(demand))
-
+    dctd1     = Dictionary([source])
+    capacity  = dctd1.doc2bow(source)
+    demand    = dctTarget.doc2bow(target)
     nS = len(capacity)
     nD = len(demand)
-
-    print("S and D = ", capacity, " " , demand)
-    for i in range(nS):
-        print("v2 = ", dctd1[i], " = ", capacity[i][1])
-    print("*"*50)
-    for j in range(nD):
-        print("v2 = ", dctTarget[j], " = ", demand[j][1])
-
-
     cap = np.array([capacity[i][1] for i in range(nS)])
     cap = cap/sum(cap)
     dem = np.array([demand[i][1] for i in range(nD)])
     dem = dem/sum(dem)
+    #  print("S and D = ", capacity, " " , demand)
+    #  for i in range(nS):
+    #      print("v2 = ", dctd1[i], " = ", capacity[i][1])
+    #  print("*"*50)
+    #  for j in range(nD):
+    #      print("v2 = ", dctTarget[j], " = ", demand[j][1])
 
-    print("Cap vector ", cap)
-    print("Dem vector ", dem)
+    #  print("Cap vector ", cap)
+    #  print("Dem vector ", dem)
 
     # distances
-    S = [model.wv[dctd1[i]] for i in range(nS)]
-    D = [model.wv[dctTarget[i]] for i in range(nD)]
-    dd = pairwise_distances(S, D, metric="euclidean")
-    for i in range(nS):
-        print([dd[i][j] for j in range(nD)])
+    S         = [model.wv[dctd1[i]] for i in range(nS)]
+    D         = [model.wv[dctTarget[i]] for i in range(nD)]
+    dd        = pairwise_distances(S, D, metric = "euclidean")
 
     [z, xSol] = solveTransport(dd, cap, dem)
-    
-    indexMax = [np.argmax(xSol[i]) for i in range(nS)]
+
+    indexMax  = [np.argmax(xSol[i]) for i in range(nS)]
     thickness = [xSol[i][indexMax[i]] for i in range(nS)]
-    indexMax = [indexMax[i] + nS for i in range(nS)]
+    indexMax  = [indexMax[i] + nS for i in range(nS)]
 
         
-    X = []
+    X  = []
     tt = []
     for i in range(nS):
         X.append(model.wv[dctd1[i]])
@@ -995,79 +985,86 @@ def transportationProblem(model, target, source):
         tt.append("target")
 
     seed = np.random.RandomState(seed=27)
-    mds = manifold.MDS(n_components = 2, metric = True, max_iter = 3000, eps =
+    mds  = manifold.MDS(n_components = 2, metric = True, max_iter = 3000, eps =
     1e-9, random_state = seed, dissimilarity = "euclidean", n_jobs = nCores)
-    sol = mds.fit(X).embedding_
+    sol  = mds.fit(X).embedding_
 
 
-    colors = ["blue", "red", "green", "magenta"]
+    colors      = ["blue", "red", "green", "magenta"]
     typesLabels = ["doc", "target"]
-    nPoints = len(X)
-    print("TT is = ", tt)
-    data = []
+    nPoints     = len(X)
+    data        = []
+    words       = [dctd1[i] for i in range(nS)]
+    ids         = [i for i in range(nPoints) if tt[i] == "doc"]
+    trace = go.Scatter(
+                       x            = sol[ids,0],
+                       y            = sol[ids,1],
+                       showlegend   = False,
+                       hoverinfo    = "skip",
+                       text         = words,
+                       textposition = "bottom",
+                       mode         = "text+markers",
+                       marker       = dict(color = "red",size = cap*100))
+    data.append(trace)
 
-    words = [dctd1[i] for i in range(nS)]
-    ids =[i for i in range(nPoints) if tt[i] == "doc"]
-    sizes = cap*100
-    trace = go.Scatter(x = sol[ids,0],
-                       y = sol[ids,1],
-                       showlegend = False,
-                       hoverinfo="skip",
-                       text = words,
-                       textposition = "bottom",
-                       mode = "text+markers",
-                       marker=dict(color="red",size=cap*100))
-    data.append(trace)
     words = [dctTarget[i] for i in range(nD)]
-    ids = range(nS, nS+nD)
-    trace = go.Scatter(x = sol[ids,0],
-                       y = sol[ids,1],
-                       showlegend = False,
-                       text = words,
+    ids   = range(nS, nS+nD)
+    trace = go.Scatter(
+                       x            = sol[ids,0],
+                       y            = sol[ids,1],
+                       showlegend   = False,
+                       text         = words,
                        textposition = "bottom",
-                       mode = "text+markers",
-                       marker=dict(color="blue",size=dem*100))
+                       mode         = "text+markers",
+                       marker       = dict(color      = "blue",size = dem*100))
     data.append(trace)
+
     annotations = []
     for i in range(nS):
-        annot = dict(x=sol[i,0],
-                     y=sol[i,1],
-                     xref = "x",
-                     yref = "y",
-                     text=round(thickness[i],2),
-                     ax = -20,
-                     ay = -20,
-                     #  ax = (sol[indexMax[i],0]-sol[i,0])*500,
-                     #  ay = (sol[indexMax[i],1]-sol[i,1])*500,
-                     showarrow=False)
+        annot = dict(
+                     x         = sol[i,0],
+                     y         = sol[i,1],
+                     xref      = "x",
+                     yref      = "y",
+                     text      = round(thickness[i],2),
+                     ax        = -50,
+                     ay        = -50,
+                     #  ax     = (sol[indexMax[i],0]-sol[i,0])*500,
+                     #  ay     = (sol[indexMax[i],1]-sol[i,1])*500,
+                     showarrow = False)
         annotations.append(annot)
 
-
-
-        trace = go.Scatter(x = [sol[i,0], sol[indexMax[i],0]],
-                           y = [sol[i,1], sol[indexMax[i],1]],
-                           showlegend = False,
-                           opacity = 0.25,
-                           mode="lines",
-                           text=round(thickness[i],2),
-                           #  textposition="top center",
-                           line=dict(color="red",width=thickness[i]*20))
+        trace = go.Scatter(
+                           x               = [sol[i,0], sol[indexMax[i],0]],
+                           y               = [sol[i,1], sol[indexMax[i],1]],
+                           showlegend      = False,
+                           opacity         = 0.25,
+                           mode            = "lines",
+                           text            = round(thickness[i],2),
+                           #  textposition = "top center",
+                           line            = dict(color = "red",width = thickness[i]*20))
         data.append(trace)
 
 
-    layout = go.Layout(title="MDS of Two Sentences",
-    annotations = annotations,
-    xaxis = dict(zeroline=False),
-    yaxis = dict(zeroline=False))
-    fig = go.Figure(data=data, layout=layout)
+    layout = go.Layout(
+                        title       = "MDS of Two Sentences",
+                        annotations = annotations,
+                        xaxis       = dict(zeroline  = False),
+                        yaxis       = dict(zeroline  = False))
+
+    fig         = go.Figure(data = data, layout = layout)
+
     plotly.offline.plot(fig)
 
 
 def solveTransport(matrixC, cap, dem):
+    """
+    Solve transportation problem as an LP.
+    """
     
-    nS = len(cap)
-    nD = len(dem)
-    cpx = cplex.Cplex()
+    nS    = len(cap)
+    nD    = len(dem)
+    cpx   = cplex.Cplex()
     x_ilo = []
     cpx.objective.set_sense(cpx.objective.sense.minimize)
     for i in range(nS):
@@ -1080,7 +1077,6 @@ def solveTransport(matrixC, cap, dem):
                               names = [varName])
     # capacity constraint
     for i in range(nS):
-        print("Capacity constraint supplier ", i, " ... rhs = ", cap[i] )
         index = [x_ilo[i][j] for j in range(nD)]
         value = [1.0]*nD
         capacity_constraint = cplex.SparsePair(ind=index, val=value)
@@ -1091,16 +1087,13 @@ def solveTransport(matrixC, cap, dem):
     # demand constraints
     #  for j in dctTarget:
     for j in range(nD):
-        print("Demand constraint customer ", j, " ... rhs = ", dem[j])
         index = [x_ilo[i][j] for i in range(nS)]
-        #  index = [x_ilo[i][j] for i in dctd1]
-        #  value = [1.0]*len(dctd1)
         value = [1.0]*nS
         demand_constraint = cplex.SparsePair(ind=index, val=value)
         cpx.linear_constraints.add(lin_expr = [demand_constraint],
                                    senses   = ["G"],
                                    rhs      = [dem[j]])
-
+    cpx.parameters.simplex.display.set(0)
     cpx.solve()
 
     z = cpx.solution.get_objective_value()
@@ -1161,8 +1154,62 @@ def compileWMDSimilarityList(modelWord2Vec, target, docs, N):
 
     print ("## Computing distances using WMD (parallel version [p={0}])\
     ...".format(nCores))
+    nChunks = 10
+    nDocs = len(docs)
+    chunkSize = math.ceil(nDocs/nChunks)
 
-    sims = getMostSimilarWMD(modelWord2Vec, docs, target, 5)
+    start = timer()
+    progr = 0
+    cumResults = []
+    p = Pool(nCores)
+    bestDist = math.inf
+
+    for counter in range(nChunks):
+        init = progr
+        till = min(progr + chunkSize, nDocs)
+        progr += chunkSize
+        print("Chunk [", counter, "] = From ", init, " to ", till)
+        tasks = []
+        for i in range(init, till):
+            tasks.append([target, docs[i]])
+
+        results = p.starmap(modelWord2Vec.wmdistance, tasks)
+        dist = np.array(results)
+        idx  = dist.argsort()
+        cumResults.extend(dist)
+
+        if dist[idx[0]] < bestDist:
+            bestDist = dist[idx[0]]
+            print ("** Doc {0:10d} [{1:5.2f}] :: {2}".format(idx[0]+init,
+            bestDist, docs[idx[0]+init]))
+
+
+
+
+    
+    #  nDocs = len(docs)
+    #  start = timer()
+    #  # create list of tasks for parallel processing
+    #  tasks = []
+    #  for i in range(nDocs):
+    #      tasks.append([target,docs[i]])
+    #
+    #  p = Pool(nCores)
+    #  results = p.starmap(modelWord2Vec.wmdistance, tasks)
+    #  distances = np.array(results)
+    distances = np.array(cumResults)
+    idx = distances.argsort()
+    #  for i in range(N):
+    #      print(distances[idx[i]], " ", docs[idx[i]])
+    p.close()
+    p.join()
+    print("... done with distance computation in {0:5.2f} seconds.\n".format(timer()-start))
+
+
+    #  print ("## Computing distances using WMD (sequential version)\
+    #  ...".format(nCores))
+    #  start = timer()
+    #  sims = getMostSimilarWMD(modelWord2Vec, docs, target, 5)
 
     # NOTE: The corpus now needs to be re-processed, since when we use the
     # transportation model below, we need to get the word2vec representation of
@@ -1172,10 +1219,12 @@ def compileWMDSimilarityList(modelWord2Vec, target, docs, N):
 
 
     # source : the origin, the document we want to transform into the target
-    source = docs[sims[2][0]]
-    transportationProblem(modelWord2Vec, target, source)
+    #  source = docs[sims[2][0]]
+    #  transportationProblem(modelWord2Vec, target, source)
+    #  print("... done with distance computation in {0:5.2f} seconds.\n".format(timer()-start))
 
-    return sims 
+    #  return sims
+    return idx, distances
     
 
 def main(argv):
@@ -1184,6 +1233,7 @@ def main(argv):
     '''
 
     myClusters = Clusters()
+    global target
 
     docsAux    = [] #  the original documents, as read from disk
     docs       = [] #  the documents in format required by doc2vec
@@ -1191,17 +1241,38 @@ def main(argv):
     distMatrix = [] #  the distance matrix used by hierarchical clustering
 
     parseCommandLine(argv)
-    vocabularyBuilding(prefix)
-    
-    target = readTargetSentence(targetFile)
-    targetTokenized = docPreprocessing(target)
+    #  vocabularyBuilding(prefix)
+    #
+    #  target = readTargetSentence(targetFile)
+    #  targetTokenized = docPreprocessing(target)
 
     if os.path.exists("preprocessedSentences.txt"):
+
         print("\n\n>>> Preprocessed sentences read from disk (skipping preprocessing)")
         with open('preprocessedSentences.txt', 'r') as f:
             docs = json.load(f)
         with open('fullSentences.txt', 'r') as f:
             corpus = json.load(f)
+
+        #  with open("newPre.txt", "w") as f:
+        #          writer = csv.writer(f)
+        #          writer.writerows(docs)
+        #
+        #  f.close()
+
+        with open("newPre.txt") as in_file:
+                totlines =  sum(1 for _ in in_file)
+        print("tot lines ========== ", totlines)
+        i = 0
+        with open('newPre.txt', 'r') as readFile:
+            reader = csv.reader(readFile)
+            for i in range(totlines):
+                row = next(reader)
+                print(reader.line_num, " == ", row)
+
+
+        exit(111)
+
 
         printSummary(-1, docs)
 
@@ -1252,7 +1323,8 @@ def main(argv):
         modelDoc2Vec = applyDoc2Vec(docs)
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
         
-        similarityList = compileDoc2VecSimilarityList(modelDoc2Vec, targetTokenized, docs, 5)
+        similarityList = compileDoc2VecSimilarityList(modelDoc2Vec,
+        targetTokenized, docs, nTop)
         print("Target sentence : ", target)
         print("="*80)
         for i,j in similarityList:
@@ -1263,25 +1335,44 @@ def main(argv):
         exit(111)
 
     wmd = True
-    if wmd == True:
+    if wmd:
+
         modelWord2Vec = createWord2VecModel(docs)
 
         # one the vocabulary is build, we reprocess the entire corpus
         docs, corpus = cleanCorpus(modelWord2Vec, docs, corpus)
         # find top N most similar sentences to target
-        similarityList = compileWMDSimilarityList(modelWord2Vec,
-        targetTokenized, docs, 5)
+        idx, distances = compileWMDSimilarityList(modelWord2Vec,
+        targetTokenized, docs, nTop)
 
-        print("Target sentence : ", target)
-        print("="*80)
-        for i in range(5):
-            idDoc = similarityList[i][0]
-            score = similarityList[i][1]
-            ss = ", ".join( repr(e) for e in corpus[idDoc] )
-            print("s[{0:5d}] = {1:5.2f} :: {2}".format(idDoc, score, ss))
+        print("** ** ** Target sentence : ", target)
+        for i in range(nTop):
+            #  idDoc = similarityList[i][0]
+            #  score = similarityList[i][1]
+            #  ss = ", ".join( repr(e) for e in corpus[idDoc] )
             print("="*80)
+            ss = ", ".join( repr(e) for e in corpus[idx[i]-1] )
+            print(ss)
+            print("-"*80)
+            ss = ", ".join( repr(e) for e in corpus[idx[i]] )
+            print("{0:2d} - s[{1:5d}] = {2:5.2f} :: {3}".format(i+1, idx[i],
+            distances[idx[i]], ss))
+            print("-"*80)
+            ss = ", ".join( repr(e) for e in corpus[idx[i]+1] )
+            print(ss)
+            
+            print("="*80)
+            print("\n\n")
 
-    exit(123)
+        print("Do you want to produce a mapping? Choose sentence [1-",nTop,"]\
+        (any other number to exit)")
+        k = int(input())
+        if k > 0 and k <= nTop:
+            source = docs[idx[k-1]]
+            transportationProblem(modelWord2Vec, targetTokenized, source)
+
+
+        exit(123)
     
     if distanceType == "1":
         print("## Computing docs similarity using doc2vec...")
