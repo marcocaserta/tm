@@ -37,6 +37,7 @@ https://github.com/RaRe-Technologies/gensim/blob/develop/docs/notebooks/doc2vec-
 from multiprocessing import Pool
 #  from itertools import product
 import json
+import csv
 import sys, getopt
 import cplex
 import os
@@ -77,10 +78,18 @@ from nltk import word_tokenize
 
 stop_words = stopwords.words("english")
 
-pressrelease_folders = ["NEWS_RELEASE_v2/"]
-pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2/"]
+pressrelease_folders = ["data/NEWS_RELEASE_v3/"]
+pressrelease_folders_txt = ["data/NEWS_RELEASE_TXT_v3/"]
 #  pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2CLEANED/"]
-prefix = path.expanduser("~/gdrive/research/nlp/data/")
+prefix = path.expanduser("~/gdrive/research/nlp/")
+edgar_models_folder = "data/edgar_models"
+d2vmodelname = "doc2vec.model"
+
+results_folder = "results"
+project_folder = "edgar/"
+
+simDoc2VecMatrixFile = "similarityDoc2Vec.txt"
+simWMDMatrixFile = "similarityWMD.csv"
 
 inputfile    = ""
 distanceType = -1
@@ -190,7 +199,7 @@ def parseCommandLine(argv):
 
 
 
-def readDocumentsNew(docs, baseName, prefix):
+def readDocuments(docs, prefix):
     """
     Read press release files (all files in a folder).
     """
@@ -221,28 +230,6 @@ def readDocumentsNew(docs, baseName, prefix):
 
 
     fmap.close()
-
-
-def readDocuments(docs, nDocs, baseName, nCompany, prefix):
-    # define docs organization
-    # docs 1 to 12 --> google --> "g"lt
-    # docs 13 to 18 --> apple --> "a"
-    # nCompany = [12, 6] --> number of documents for each company
-    # prefix = ["g", "a"]
-
-    index = []
-    index.append(nCompany[0])
-    for i in range(1,len(nCompany)):
-        index.append(index[i-1]+nCompany[i])
-
-    for c in range(len(nCompany)):
-        for i in range(1,nCompany[c]+1):
-            namefile = baseName + prefix[c] + str(i) + ".txt"
-            #  print("Reading file ", namefile, "\n")
-            f = open(namefile)
-            d = f.read()
-            docs.append(d)
-
 
 def printSummary(docs):
     print("\n\nmarco caserta (c) 2018 ")
@@ -360,27 +347,27 @@ def applyDoc2Vec(docs):
     > print(model.docvecs[document_tag_here]
     """
     
-    if os.path.exists("doc2vec.model"):
+    fullpath = path.join(prefix, edgar_models_folder, d2vmodelname)
+    if os.path.exists(fullname):
         print(">>> model was read from disk ")
-        model = doc2vec.Doc2Vec.load("doc2vec.model")
+        model = doc2vec.Doc2Vec.load(fullname)
         return model
 
     # instantiate model (note that min_count=2 eliminates infrequent words)
     model = doc2vec.Doc2Vec(size = 300, window = 300, min_count = 2, iter
-    = 300, workers = 4, dm=0)
+    = 300, workers = nCores, dm=0)
 
     # we can also build a vocabulary from the model
     model.build_vocab(docs)
     #  print("Vocabulary was built : ", model.wv.vocab.keys(), " ----> this is a voc")
 
     # train the model
-    nrIters = 25
-    #  model.train(docs, total_examples=model.corpus_count, epochs=model.iter)
-    model.train(docs, total_examples=model.corpus_count, epochs=nrIters)
+    model.train(docs, total_examples=model.corpus_count, epochs=model.iter)
+    model.init_sims(replace=True) #  normalize vectors
 
     # if we want to save the model on disk (to reuse it later on without
     # training)
-    model.save("doc2vec.model")
+    model.save(fullname)
 
     # this can be used if we are done training the model. It will reelase some
     # RAM. The model, from now on, will only be queried
@@ -434,15 +421,17 @@ def computeDocsSimilarities(model, docs):
                 vals[i][doc_id] = round(1.0-j,4) # round is needed to symmetry
 
 
+    fullpath = path.join(prefix,results_folder, project_folder)
+    fullname = fullpath + simDoc2VecMatrixFile
     # save similarity matrix on disk
-    f = open("similarityDoc2Vec.txt", "w")
+    f = open(fullname, "w")
     for i in range(nDocs):
         for j in range(nDocs):
             f.write("{0:4.2f}\t".format(vals[i][j]))
         f.write("\n")
     f.close()
 
-    print("... similarity written on disk file 'similarityDoc2Vec.txt' ")
+    print("... similarity written on disk file '",simDoc2VecMatrixFile,"' ")
 
     return vals
 
@@ -451,7 +440,8 @@ def trainingModel4wmd(corpus):
     """
     Training a model to be used in WMD.
     """
-    model = Word2Vec(corpus, workers = 4, size = 100, window = 300, min_count = 2, iter = 50)
+    model = Word2Vec(corpus, workers = nCores, size = 100, window = 300,
+    min_count = 2, iter = 250)
     #  model = Word2Vec(corpus)
 
     # use the following if we want to normalize the vectors
@@ -467,13 +457,14 @@ def wmd4Docs(docs):
     gensim function. The model is stored into "model"
     """
 
-    if os.path.exists("similarityWMD.csv"):
+    fullpath = path.join(prefix,results_folder, project_folder)
+    fullname = fullpath + simWMDMatrixFile
+    if os.path.exists(fullname):
         print(" ... reading WMD matrix from disk ...")
         start = timer()
         vals = []
-        import csv
 
-        reader = csv.reader(open("similarityWMD.csv", "r"), delimiter=",")
+        reader = csv.reader(open(fullname), delimiter=",")
         x = list(reader)
         vals = np.array(x).astype("float")
         print(" ... Done in {0:5.2f} seconds.\n".format(timer()-start))
@@ -484,17 +475,13 @@ def wmd4Docs(docs):
         #  doc = nltkPreprocessing(doc) # already done outside
         wmd_corpus.append(doc)
 
-    #  i = 0
-    #  for doc in wmd_corpus:
-    #      print(doc, " ---> doc ",i)
-    #      i += 1
 
     print("## Building model for WMD .... ")
     start = timer()
     modelWord2Vec = trainingModel4wmd(wmd_corpus)
     print("... Done in {0:5.2f} seconds.\n".format(timer()-start))
 
-    print ("## Computing distances using WMD (parallel version [p={0}])
+    print ("## Computing distances using WMD (parallel version [p={0}])\
     ...".format(nCores))
 
     nDocs = len(wmd_corpus)
@@ -529,13 +516,11 @@ def wmd4Docs(docs):
 
     # save matrix on disk
 
-    csvfile = "similarityWMD.csv"
-    import csv
-    with open(csvfile, "w") as output:
+    with open(fullname, "w") as output:
         writer = csv.writer(output, lineterminator='\n')
         writer.writerows(vals)
 
-    print("Word Mover's Distances written on disk file 'similarityWMD.csv' ")
+    print("Word Mover's Distances written on disk file '",fullname, "' ")
     
     return vals
 
@@ -610,77 +595,6 @@ def clustering(model, docs, chartType=0):
     elif chartType == "3d":
         create3dChart2(centers, pcaData, kmeans.labels_)
     
-
-def affinityPropagation(model, docs):
-    """
-    This is used to get an idea of the number of clusters that should be
-    created. It might be a preliminary step to cluster analysis.
-    Note that it is possible to establish the relative importance of each
-    point in the dataset.
-    """
-
-    nDocs = len(docs)
-    pcaData = PCA(n_components = 2).fit_transform(model.docvecs)
-    df = pd.DataFrame({
-        "id": range(nDocs),
-        "x1": pcaData[:,0],
-        "x2": pcaData[:,1]})
-
-    af = AffinityPropagation(affinity="euclidean",
-    damping=0.9,convergence_iter=1000,verbose=True).fit(pcaData)
-    cluster_centers_indices = af.cluster_centers_indices_
-    labels = af.labels_
-    n_clusters_ = len(cluster_centers_indices)
-
-    print('Estimated number of clusters: %d' % n_clusters_)
-    print("Labels = ", labels)
-
-    colors = ['blue','green','red','cyan','magenta']
-    data = []
-    for k, col in zip(range(n_clusters_), colors):
-        class_members = labels == k
-        ids = [i for i in range(nDocs) if class_members[i] == True]
-        cluster_center = pcaData[cluster_centers_indices[k], :]
-        trace1 = go.Scatter(x=pcaData[class_members, 0], 
-                            y=pcaData[class_members, 1],
-                            showlegend=False,
-                            text = ids,
-                            textposition = "bottom",
-                            mode='text+markers', marker=dict(color=col,
-                                                       size=10))
-        
-        trace2 = go.Scatter(x=[cluster_center[0]], 
-                            y=[cluster_center[1]], 
-                            showlegend=False,
-                            mode='markers', marker=dict(color=col,
-                                                        size=14))
-        data.append(trace1)
-        data.append(trace2)
-        for x in pcaData[class_members]:
-            trace3 = go.Scatter(x = [cluster_center[0], x[0]], 
-                                y=[cluster_center[1], x[1]],
-                                showlegend=False,
-                                opacity=0.25,
-                                mode='lines', line=dict(color=col,
-                                                        width=2))
-            data.append(trace3)
-
-    layout = go.Layout(title='Estimated number of clusters: %d' % n_clusters_,
-                       xaxis=dict(zeroline=False),
-                       yaxis=dict(zeroline=False))
-    fig = go.Figure(data=data, layout=layout)
-
-    plotly.offline.plot(fig)
-
-def getClustersFromLabels(labels):
-
-    numClusters = len(labels)
-    sets = []
-    for i in range(numClusters):
-        sets.append([])
-    for i in range(len(labels)):
-        sets[labels[i]].append(i)
-
     
 def nltkClustering(model, nrClusters):
     """
@@ -833,11 +747,6 @@ def main(argv):
 
     myClusters = Clusters()
 
-    #  baseName   = "../examples2/txt/"
-    #  nDocs      = sum(nCompany)
-    #  prefix   = ["g", "a"]
-    #  readDocuments(docsAux, nDocs, baseName, nCompany, prefix)
-    #  nCompany   = [12, 6]
     docsAux    = [] #  the original documents, as read from disk
     docs       = [] #  the documents in format required by doc2vec
     corpus     = [] #  the documents after preprocessing (not fit for doc2vec)
@@ -845,14 +754,14 @@ def main(argv):
 
     parseCommandLine(argv)
 
-    if os.path.exists("preprocessedDocs.txt"):
+    if os.path.exists("preEdgar/preprocessedDocs.txt"):
         print("\n\n>>> preprocessed docs read from disk (skipping preprocessing)")
-        with open('preprocessedDocs.txt', 'r') as f:
+        with open('preEdgar/preprocessedDocs.txt', 'r') as f:
             docs = json.loads(f.read())
-        printSummary(docsAux)
+        printSummary(docs)
 
     else:
-        readDocumentsNew(docsAux, baseName, prefix)
+        readDocuments(docsAux, prefix)
         printSummary(docsAux)
 
         print("## Init Document Preprocessing [p={0}] ...".format(nCores))
@@ -864,19 +773,10 @@ def main(argv):
         p.join()
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
-        with open('preprocessedDocs.txt', 'w') as outfile:
+        with open('preEdgar/preprocessedDocs.txt', 'w') as outfile:
             json.dump(docs, outfile)
 
-    print("## Init Document Transformation for Doc2Vec...")
-    start = timer()
-    # add tags to documents (required by doc2vec)
-    docs = transform4Doc2Vec(docs) 
-    print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
-    print("## Init Doc2Vec Model Creation ...")
-    start = timer()
-    modelDoc2Vec = applyDoc2Vec(docs)
-    print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
     # REM: If we want to use WMD, we need to use a model that creates vectors
     #  for individual words. If we want to use doc2vec, then the vector is per
@@ -891,10 +791,22 @@ def main(argv):
 
     
     if distanceType == "1":
+        print("## Init Document Transformation for Doc2Vec...")
+        start = timer()
+        # add tags to documents (required by doc2vec)
+        docs = transform4Doc2Vec(docs) 
+        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
+        print("## Init Doc2Vec Model Creation ...")
+        start = timer()
+        modelDoc2Vec = applyDoc2Vec(docs)
+        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
         print("## Computing docs similarity using doc2vec...")
         start = timer()
         distMatrix = computeDocsSimilarities(modelDoc2Vec, docs)
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
     elif distanceType == "2":
         print("## Computing docs similarity using WMD ...")
         distMatrix = wmd4Docs(corpus)
