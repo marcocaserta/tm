@@ -46,13 +46,13 @@ organized at a sentence level.
 """
 
 from multiprocessing import Pool
-#  from itertools import product
 import json
 import sys, getopt
 import cplex
 import os
 from os import path, listdir
 import csv
+import itertools
 import fnmatch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -90,91 +90,34 @@ from nltk.corpus import stopwords
 
 stop_words = stopwords.words("english")
 
-pressrelease_folders = ["NEWS_RELEASE_v2/"]
-pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2/"]
-#  pressrelease_folders_txt = ["NEWS_RELEASE_TXT_v2CLEANED/"]
-prefix = path.expanduser("~/gdrive/research/nlp/data/")
-ecco_folders = ["ecco/ecco_portions/normed/96-00/"]
-vocab_folder = "google_vocab/"
+prefix             = path.expanduser("~/gdrive/research/nlp/data/")
+ecco_folders       = ["ecco/ecco_portions/normed/96-00/"]
+vocab_folder       = "google_vocab/"
+ecco_models_folder = "ecco_models/"
+
+querySol = "topList.txt" #  storing the current best query result
+modelname = "word2vec.model.96-00.100" #  the Word2Vec model used in WMD
 #  ecco_folders = ["/home/marco/gdrive/research/nlp/data/temp/"]
 
-nCores       = 4
+nCores       =  4
 totFiles     = -1
-nTop         = 5
+nChunks      = 10
 
-class Clusters:
+
+class Top:
     """
-    Basic class to implement clusters related function. This class is used to
-    store a cluster algoritm solution. Starting from a set of labels, i.e.,
-    the cluster each document is assigned to, we reconstruct a full solution:
-    - the number of clusters defined
-    - the set of documents in each cluster
-    - the centers of each cluster (centers can be set from outside, if computed
-      by an algorithm)
+    Data structure used to store the top N sentences matching a given target
+    sentence.
+    We store both the full sentence (untokenized) and the tokenized and
+    preprocessed sentence. We also store the previous and next sentences.
     """
-    def __init__(self):
-        self.nPoints = -1 #  number of points in the cluster
-        self.n       = -1 #  number of clusters
-        self.labels  = [] #  list of labels (for each point)
-        self.sets    = [] #  for each cluster, the set of documents in it
-        self.tots    = [] #  total number of docs in each cluster
-        self.centers = [] #  3-d center of each cluster (based on PCA)
+    def __init__(self, nTop):
+        self.score = np.array([math.inf]*nTop)
+        self.tokenSent = [[]]*nTop
+        self.sent     = [""]*nTop
+        self.previous = [""]*nTop
+        self.next     = [""]*nTop
 
-    def updateClusterInfo(self):
-        """
-        Basic computation of clusters info, based on the labels vector.
-        """
-        self.nPoints = len(self.labels)
-        self.n       = len(np.unique(self.labels))
-        self.centers = [ [0.0 for j in range(3)] for i in range(self.n)]
-
-    def createSetsFromLabels(self):
-        """
-        Get the set of points belonging to each cluster.
-
-        Input:
-        labels = [ for each point, the cluster label]
-
-        Return:
-        clusterSet =[
-            [list of points in first cluster],
-            [list of points in second cluster], 
-            ...
-            ]
-        """
-    
-        self.tots = [0]*self.n
-        for i in range(self.n):
-            self.sets.append([])
-        for i in range(self.nPoints):
-            self.sets[self.labels[i]].append(i)
-            self.tots[self.labels[i]] += 1
-            
-
-
-    def printSets(self):
-        for c in range(self.n):
-            print("C({0:3d}) :: {1}".format(c, self.sets[c]))
-
-    def computeCenters3d(self, data):
-        """
-        Compute cluster centers based on PCA 3-d data. We transform each data
-        point in a 3-d vector using PCA. Then, using the labels associated to a
-        cluster solution, we compute the center of the cluster.
-
-        Currently, we simply compute the average of each dimension. Other
-        schemes can be explored.
-        """
-
-
-        for i in range(self.nPoints):
-            print("Label of point ", i, " is ", self.labels[i])
-            for j in range(3):
-                self.centers[self.labels[i]][j] += data[i][j]
-
-        for c in range(self.n):
-            for j in range(3):
-                self.centers[c][j] /= self.tots[c]
 
 # Parse command line
 def parseCommandLine(argv):
@@ -214,12 +157,24 @@ def parseCommandLine(argv):
         exit(2)
 
 def readTargetSentence(targetFile):
-    ff = open(targetFile)
-    target = ff.read()
+    """
+    Read the target sentence from disk.
+    Note that we also read how many sentences should be included in the query.
+    """
+    ff = open(targetFile, "r")
+    reader = csv.reader(ff)
+    target = next(reader)[0]
+    nTop   = int(next(reader)[0])
+
     ff.close()
-    return target
+    return target, nTop
 
 def listOfFiles():
+    """
+    This is used to create the list of tasks in reading files. These tasks are
+    then passed to the parallel version of the reading. But, at this moment, it
+    does not work.
+    """
     
     i = -1
     fullList = []
@@ -260,7 +215,6 @@ def readEccoParallel(namefile):
 
 def readEcco():
 
-
     i = -1
     docs = []
     sentences = []
@@ -294,28 +248,6 @@ def readEcco():
     return docs, sentences, totFiles
 
 
-#  def readEcco(prefix):
-#      i = -1
-#      docs = []
-#      for folder in ecco_folders:
-#          i += 1
-#          fullpath = path.join(prefix, folder)
-#          totFiles = len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
-#          countFiles = 0
-#          for f in listdir(path.join(prefix, folder)):
-#              if f != "1780100800.clean.txt":
-#                  continue
-#
-#              countFiles += 1
-#              fullname = fullpath + f
-#              ff = open(fullname)
-#              docs.append(ff.read())
-#
-#              print("{0:5d}/{1:5d} :: Reading file {2:10s} ".format(countFiles,
-#              totFiles, f))
-#
-#      return docs
-
 def vocabularyBuilding(prefix):
     '''
     Build embeddings and vocabulary based on Google News set (1.5Gb and 3M
@@ -342,7 +274,7 @@ def vocabularyBuilding(prefix):
     #  filename = fullpath + "embed500.model"
     #  #  model = KeyedVectors.load(filename, mmap="r")
     #  model = KeyedVectors.load(filename)
-    #  model.init_sims()
+    #  model.init_sims(replace=True)
     #  print("Done in ", timer()-start, " time")
 
     #  return model
@@ -713,231 +645,12 @@ def getMostSimilarWMD(model, corpus, target, nTop):
 
     return sims
 
-
-def bench_k_means(estimator, name, data):
-    """
-    silhouette_score: 
-    The best value is 1 and the worst value is -1. Values near 0 indicate
-    overlapping clusters. Negative values generally indicate that a sample has
-    been assigned to the wrong cluster, as a different cluster is more
-    similar.
-    """
-    t0 = timer()
-    estimator.fit(data)
-
-    print("{0:15s}{1:10.2f}{2:10.2f}{3:10.2f}\t{4}".format(name, timer()-t0,
-    estimator.inertia_, metrics.silhouette_score(data,
-    estimator.labels_,metric="euclidean",sample_size=len(data)),
-    estimator.labels_))
-
-def clustering(model, docs, chartType=0):
-
-    nDocs = len(docs)
-
-    print(82 * '_')
-    print("{0:15s}{1:10s}{2:10s}{3:10s}\t{4}".format("init", "time",
-    "inertia", "silhoutte", "clusters"))
-
-    bench_k_means(KMeans(init="k-means++", n_clusters = 3, n_init = 2), name =
-    "k-means++ 3", data = model.docvecs)
-    for k in range(2,8):
-        nn = "random-"+str(k)
-        bench_k_means(KMeans(init="random", n_clusters = k, n_init = 2), name =
-        nn, data = model.docvecs)
-    pca = PCA(n_components=3).fit(model.docvecs)
-    bench_k_means(KMeans(init=pca.components_, n_clusters = 3, n_init = 1), name =
-    "PCA", data = model.docvecs)
-    print(82 * '_')
-
-    if chartType != "None":
-        nClusters = 3
-        pcaData = PCA(n_components = 3).fit_transform(model.docvecs)
-        kmeans = KMeans(n_clusters=nClusters, n_init=3)
-        kmeans.fit(pcaData)
-        centers = kmeans.cluster_centers_
-        print(kmeans.labels_)
-        df = pd.DataFrame({
-            "id": range(nDocs),
-            "x1": pcaData[:,0],
-            "x2": pcaData[:,1],
-            "x3": pcaData[:,2],
-            "cluster": kmeans.labels_})
-        
-        sets = []
-        labels = kmeans.labels_
-        for i in range(nClusters):
-            sets.append([])
-        for i in range(len(labels)):
-            sets[labels[i]].append(i)
-
-        for c in range(nClusters):
-            print("Cluster ", c, " :: ", sets[c])
-
-    else:
-        return
-
-    if chartType == "2d":
-        sns.lmplot("x1", "x2",data=df , hue="cluster", fit_reg=False)
-        plt.title("Clusters Visualization based on PCA")
-        sns.plt.savefig("clusters.png")
-        print("Clusters visualization saved on disk ('clusters.png')")
-
-    elif chartType == "3d":
-        create3dChart2(centers, pcaData, kmeans.labels_)
-    
-
-def getClustersFromLabels(labels):
-
-    numClusters = len(labels)
-    sets = []
-    for i in range(numClusters):
-        sets.append([])
-    for i in range(len(labels)):
-        sets[labels[i]].append(i)
-
-    
-def nltkClustering(model, nrClusters):
-    """
-    Use the clustering function of nltk to define my own distance function.
-    """
-
-    import nltk
-    from nltk.cluster import KMeansClusterer
-
-    num_clusters = nrClusters
-    kclusterer = KMeansClusterer(num_clusters, 
-        distance = nltk.cluster.util.cosine_distance,
-        #  distance = nltk.cluster.util.euclidean_distance,
-        repeats = 500)
-    labels = kclusterer.cluster(model.docvecs, assign_clusters=True)
-
-    return labels
-
-def hierarchicalClustering(distanceMatrix, withDendrogram=False):
-    """ 
-    Use the linkage function of scipy.cluster.hierarchy.
-
-    Parameters:
-    - withDendrogram : True if the dendrogram should be produced and saved on disk
-
-    We try out different methods for hierarchical clustering, based on
-    different ways of computing distances between clusters. We select the one 
-    that maximizes the Cophenetic Correlation Coefficient.
-
-    Returns:
-    - labels: The clusters labels
-    """
-
-    # convert symmetric distance matrix into upper triangular array
-    distArray = ssd.squareform(np.asmatrix(distanceMatrix), checks=False)
-    # find "best" method
-    methods    = ["ward", "median", "average", "single", "complete"]
-    bestVal    = 0.0
-    bestMethod = " "
-    for mm in methods:
-        Z = linkage(distArray, method=mm, optimal_ordering=True)
-
-        # test the goodness of cluster with cophenetic correl coefficient
-        c, cophDist = cophenet(Z, distArray)
-        print("[ {0:10s} ] Cophenetic = {1:5.2f}".format(mm, c))
-        if c > bestVal:
-            bestVal    = c
-            bestMethod = mm
-
-    # repeat with best method
-    Z = linkage(distArray, method=bestMethod, optimal_ordering=True)
-    #  print(Z)
-    # note: The Z gives the distances at which each cluster was merged
-
-    # get the cluster for each point
-    #  maxD   = 0.95
-    maxD   = 0.3
-    labels = fcluster(Z, maxD, criterion="distance")
-    labels = labels - [1]*len(labels)  #  start from 0
-
-    if withDendrogram:
-        plt.figure(figsize=(25, 10))
-        plt.title('Hierarchical Clustering Dendrogram')
-        plt.xlabel('sample index')
-        plt.ylabel('distance')
-        dendrogram(
-            Z,
-            leaf_rotation=90.,  # rotates the x axis labels
-            leaf_font_size=8.,  # font size for the x axis labels
-            show_leaf_counts=True,
-            get_leaves=True,
-            #  truncate_mode="level",
-            #  p =5,
-        )
-        plt.axhline(y=maxD, c='k')
-        plt.savefig("dendrogram.png")
-        print("Dendrogram saved on disk ('dendrogam.png')")
-
-    return labels
-
-def get3dPCA(data):
-    """
-    Given a set of n-dimensional point, find and store the first 3 principal
-    components. These are typically used to create a 3-d chart.
-    """
-
-    return PCA(n_components = 3).fit_transform(data)
-
-
-def create3dChart(centerCoord, pcaData, labels):
-
-
-    nPoints = len(pcaData)
-    nClusters = len(centerCoord)
-    data = []
-    scatter = dict(
-        mode = "text+markers",
-        name = "docs",
-        type = "scatter3d",    
-        x = pcaData[:,0], y = pcaData[:,1], z = pcaData[:,2], 
-        text = list(range(nPoints)),
-        marker = dict(size=5, color=labels, colorscale="Jet" )
-        #  marker = dict(size=5, color=labels, colorscale="Viridis" )
-    )
-    data.append(scatter)
-
-    centers = dict(
-        mode = "markers",
-        name = "centers",
-        type = "scatter3d",
-        line = dict( width = 2, color = 'gray'),
-        opacity = 0.75,
-        x = [centerCoord[i][0] for i in range(nClusters)],
-        y = [centerCoord[i][1] for i in range(nClusters)],
-        z = [centerCoord[i][2] for i in range(nClusters)],
-        marker = dict( size=3, color="red")
-        )
-    data.append(centers)
-        
-    for i in range(nPoints):
-        trace = go.Scatter3d(
-            showlegend=False,
-            name ="lines",
-            x = [centerCoord[labels[i]][0], pcaData[i][0]],
-            y = [centerCoord[labels[i]][1], pcaData[i][1]],
-            z = [centerCoord[labels[i]][2], pcaData[i][2]],
-            mode="lines", line=dict(color="red",width=2))
-        data.append(trace)
-
-    layout = dict(
-        title = 'Documents Clustering',
-        showlegend = False,
-        scene = dict(
-            xaxis = dict( zeroline=False ),
-            yaxis = dict( zeroline=False ),
-            zaxis = dict( zeroline=False ),
-        )
-    )
-    fig = go.Figure( data=data, layout=layout )
-    plotly.offline.plot(fig, filename='PCA_Based_Clustering.html') 
-
-
 def transportationProblem(model, target, source):
+    """
+    Define the Transportation model used for the Word Movers Distance (WMD). We
+    also setup a graph, to visualize the weight associated to each pair of
+    words in a query.
+    """
 
     from gensim.corpora import Dictionary
 
@@ -1060,6 +773,7 @@ def transportationProblem(model, target, source):
 def solveTransport(matrixC, cap, dem):
     """
     Solve transportation problem as an LP.
+    This is my implementation of the WMD.
     """
     
     nS    = len(cap)
@@ -1107,13 +821,19 @@ def solveTransport(matrixC, cap, dem):
     return [z, x_sol]
 
 def createWord2VecModel(docs):
+    """
+    Read or create a Word2Vec model (depending on whether the one defined in
+    the header of this file actually exists.).
+    """
 
-    if os.path.exists("word2vec.model"):
-        print(">>> Word2Vec model was read from disk ")
-        modelWord2Vec = Word2Vec.load("word2vec.model")
+    fullpath = path.join(prefix,ecco_models_folder)
+    fullname = fullpath + modelname
+    if os.path.exists(fullname):
+        print(">>> Word2Vec model was read from disk ({0})".format(modelname))
+        modelWord2Vec = Word2Vec.load(fullname)
+        #  model = KeyedVectors.load_word2vec_format(fullname, encoding="utf-8")
+        modelWord2Vec.init_sims(replace=True)
     else:
-
-
         print("## Building word2vec model for WMD ...")
         start = timer()
         modelWord2Vec = trainingModel4wmd(docs)
@@ -1124,8 +844,16 @@ def createWord2VecModel(docs):
     return modelWord2Vec
 
 def cleanCorpus(modelWord2Vec, docs, corpus):
+    """
+    After the model has been uploaded, some of the preprocessed sentences might
+    be removed. The initial preprocessing, which was used to generate the lists
+    stored on disk, was based on the google dictionary. However, at this point,
+    we have a model, and a corresponding dictionary. We need to ensure that all
+    the words in the corpus at this point are in the dictionary.
+    """
 
     if len(docs) != len(corpus):
+        print(len(docs), " vs ", len(corpus))
         print("ERROR : Two different lengths in original and preprocessed docs")
         exit(123)
 
@@ -1140,71 +868,25 @@ def cleanCorpus(modelWord2Vec, docs, corpus):
             else:
                 count += 1
 
-    print("** ** From cleaning phase, eliminated ", count, " docs ")
+    #  print("** ** From cleaning phase, eliminated ", count, " docs ")
     return newDocs, newCorpus
 
 
 
-def compileWMDSimilarityList(modelWord2Vec, target, docs, N):
+def compileWMDSimilarityList(modelWord2Vec, target, docs, p):
     """
     Returns a list of the top N most similar sentences w.r.t. the target
     sentence, using the Word Mover's Distance method.
     """
 
 
-    print ("## Computing distances using WMD (parallel version [p={0}])\
-    ...".format(nCores))
-    nChunks = 10
     nDocs = len(docs)
-    chunkSize = math.ceil(nDocs/nChunks)
+    # create list of tasks for parallel processing
+    tasks = []
+    for i in range(nDocs):
+        tasks.append([target,docs[i]])
 
-    start = timer()
-    progr = 0
-    cumResults = []
-    p = Pool(nCores)
-    bestDist = math.inf
-
-    for counter in range(nChunks):
-        init = progr
-        till = min(progr + chunkSize, nDocs)
-        progr += chunkSize
-        print("Chunk [", counter, "] = From ", init, " to ", till)
-        tasks = []
-        for i in range(init, till):
-            tasks.append([target, docs[i]])
-
-        results = p.starmap(modelWord2Vec.wmdistance, tasks)
-        dist = np.array(results)
-        idx  = dist.argsort()
-        cumResults.extend(dist)
-
-        if dist[idx[0]] < bestDist:
-            bestDist = dist[idx[0]]
-            print ("** Doc {0:10d} [{1:5.2f}] :: {2}".format(idx[0]+init,
-            bestDist, docs[idx[0]+init]))
-
-
-
-
-    
-    #  nDocs = len(docs)
-    #  start = timer()
-    #  # create list of tasks for parallel processing
-    #  tasks = []
-    #  for i in range(nDocs):
-    #      tasks.append([target,docs[i]])
-    #
-    #  p = Pool(nCores)
-    #  results = p.starmap(modelWord2Vec.wmdistance, tasks)
-    #  distances = np.array(results)
-    distances = np.array(cumResults)
-    idx = distances.argsort()
-    #  for i in range(N):
-    #      print(distances[idx[i]], " ", docs[idx[i]])
-    p.close()
-    p.join()
-    print("... done with distance computation in {0:5.2f} seconds.\n".format(timer()-start))
-
+    results = p.starmap(modelWord2Vec.wmdistance, tasks)
 
     #  print ("## Computing distances using WMD (sequential version)\
     #  ...".format(nCores))
@@ -1224,16 +906,81 @@ def compileWMDSimilarityList(modelWord2Vec, target, docs, N):
     #  print("... done with distance computation in {0:5.2f} seconds.\n".format(timer()-start))
 
     #  return sims
-    return idx, distances
-    
+    #  return idx, distances
+    return results
+
+def updateList(tops, distances, docs, corpus):
+    """
+    Update list of top N best results.
+    This can be improved.
+    """
+
+    if min(distances) > tops.score[nTop-1]:
+        return tops
+
+    nDocs = len(docs)
+    for i in range(nTop):
+        distances.append(tops.score[i])
+
+    dist = np.array(distances)
+    idx = dist.argsort()
+    topAux = Top(nTop)
+    for i in range(nTop):
+        topAux.score[i] = dist[idx[i]]
+        # special cases for first and last sentence of the chunk
+        if idx[i] < nDocs:
+            if idx[i] == 0:
+                topAux.previous[i] = "*"
+            else:
+                topAux.previous[i] = corpus[idx[i]-1]
+            if idx[i] == len(distances)-1:
+                topAux.next[i] = "*"
+            else:
+                topAux.next[i] = corpus[idx[i]+1]
+            topAux.tokenSent[i] = docs[idx[i]]
+            topAux.sent[i]      = corpus[idx[i]]
+        else:
+            topAux.tokenSent[i] = tops.tokenSent[idx[i]-nDocs]
+            topAux.sent[i]      = tops.sent[idx[i]-nDocs]
+            topAux.previous[i]  = tops.previous[idx[i]-nDocs]
+            topAux.next[i]      = tops.next[idx[i]-nDocs]
+
+    # write current best query to disk
+    printQueryResults(topAux, nTop, toDisk = 1)
+
+    return topAux
+
+def printQueryResults(tops, nTop, toDisk = 1):
+
+    # dump it to file or print it to screen
+    if toDisk == 1:
+        sys.stdout = open(querySol, "w")
+
+    print("** ** ** Target sentence : ", target)
+    for i in range(nTop):
+        print("="*80)
+        ss = ", ".join( repr(e) for e in tops.previous[i] )
+        print(ss)
+        print("-"*80)
+        ss = ", ".join( repr(e) for e in tops.sent[i])
+        print("dist({0:2d}) = {1:5.2f} :: {2}".format(i+1, tops.score[i], ss))
+        print("-"*80)
+        ss = ", ".join( repr(e) for e in tops.next[i] )
+        print(ss)
+        
+        print("="*80)
+        print("\n\n")
+
+    sys.stdout = sys.__stdout__
+
 
 def main(argv):
     '''
     Entry point.
     '''
 
-    myClusters = Clusters()
     global target
+    global nTop
 
     docsAux    = [] #  the original documents, as read from disk
     docs       = [] #  the documents in format required by doc2vec
@@ -1241,40 +988,36 @@ def main(argv):
     distMatrix = [] #  the distance matrix used by hierarchical clustering
 
     parseCommandLine(argv)
-    #  vocabularyBuilding(prefix)
-    #
-    #  target = readTargetSentence(targetFile)
-    #  targetTokenized = docPreprocessing(target)
+    vocabularyBuilding(prefix)
 
-    if os.path.exists("preprocessedSentences.txt"):
 
-        print("\n\n>>> Preprocessed sentences read from disk (skipping preprocessing)")
-        with open('preprocessedSentences.txt', 'r') as f:
-            docs = json.load(f)
-        with open('fullSentences.txt', 'r') as f:
-            corpus = json.load(f)
+    if os.path.exists("preproc/preprocListCorpus.csv") and\
+        os.path.exists("preproc/preprocListDocs.csv"):
 
-        #  with open("newPre.txt", "w") as f:
-        #          writer = csv.writer(f)
-        #          writer.writerows(docs)
+        # ACTIVATE THIS TO PREPROCESS NEW SENTENCES
+
+        #  print("\n\n>>> Preprocessed sentences read from disk (skipping preprocessing)")
+        #  with open('preprocessedSentences.txt', 'r') as f:
+        #      docs = json.load(f)
+        #  with open('fullSentences.txt', 'r') as f:
+        #      corpus = json.load(f)
+
+        # use this to write preprocessed sentences as lists
+        #  with open("listPreprocDocs.csv", "w") as f:
+        #      writer =csv.writer(f)
+        #      writer.writerows(docs)
+        #  with open("listPreprocCorpus.csv", "w") as f:
+        #      writer =csv.writer(f)
+        #      writer.writerows(corpus)
         #
-        #  f.close()
+        #  fDocs = open("listPreprocCorpus.csv", "r")
+        #  reader = csv.reader(fDocs)
+        #  for i in range(10):
+        #      row = next(reader)
+        #      print("Row = ", row)
 
-        with open("newPre.txt") as in_file:
-                totlines =  sum(1 for _ in in_file)
-        print("tot lines ========== ", totlines)
-        i = 0
-        with open('newPre.txt', 'r') as readFile:
-            reader = csv.reader(readFile)
-            for i in range(totlines):
-                row = next(reader)
-                print(reader.line_num, " == ", row)
-
-
-        exit(111)
-
-
-        printSummary(-1, docs)
+        #  printSummary(-1, docs)
+        print("All preprocessing...")
 
     else:
         print("## Reading and Preprocessing ECCO files [p={0}] ...".format(nCores))
@@ -1291,7 +1034,6 @@ def main(argv):
         #  for i in range(len(list(res))):
         #      print("Text ", i, " = ", list(res[i]))
         #  print(docs)
-
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
         print("## Writing sentences to disk ...")
@@ -1336,79 +1078,93 @@ def main(argv):
 
     wmd = True
     if wmd:
-
-        modelWord2Vec = createWord2VecModel(docs)
-
-        # one the vocabulary is build, we reprocess the entire corpus
-        docs, corpus = cleanCorpus(modelWord2Vec, docs, corpus)
-        # find top N most similar sentences to target
-        idx, distances = compileWMDSimilarityList(modelWord2Vec,
-        targetTokenized, docs, nTop)
-
-        print("** ** ** Target sentence : ", target)
-        for i in range(nTop):
-            #  idDoc = similarityList[i][0]
-            #  score = similarityList[i][1]
-            #  ss = ", ".join( repr(e) for e in corpus[idDoc] )
-            print("="*80)
-            ss = ", ".join( repr(e) for e in corpus[idx[i]-1] )
-            print(ss)
-            print("-"*80)
-            ss = ", ".join( repr(e) for e in corpus[idx[i]] )
-            print("{0:2d} - s[{1:5d}] = {2:5.2f} :: {3}".format(i+1, idx[i],
-            distances[idx[i]], ss))
-            print("-"*80)
-            ss = ", ".join( repr(e) for e in corpus[idx[i]+1] )
-            print(ss)
-            
-            print("="*80)
-            print("\n\n")
-
-        print("Do you want to produce a mapping? Choose sentence [1-",nTop,"]\
-        (any other number to exit)")
-        k = int(input())
-        if k > 0 and k <= nTop:
-            source = docs[idx[k-1]]
-            transportationProblem(modelWord2Vec, targetTokenized, source)
-
-
-        exit(123)
-    
-    if distanceType == "1":
-        print("## Computing docs similarity using doc2vec...")
+        print("## Setting up Word2Vec model ...")
         start = timer()
-        distMatrix = computeDocsSimilarities(modelDoc2Vec, docs)
+        modelWord2Vec = createWord2VecModel(docs)
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
-    elif distanceType == "2":
-        print("## Computing docs similarity using WMD ...")
-        distMatrix = wmd4Docs(target, corpus)
-        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
+
+        fDocs = open("preproc/preprocListDocs.csv", "r")
+        totSents = sum(1 for _ in fDocs)
         
 
-    # apply clustering algorithm on distMatrix
-    if distanceType == "1" or distanceType == "2":
-        myClusters.labels = hierarchicalClustering(distMatrix, withDendrogram=True)
-    elif distanceType == "3":
-        myClusters.labels = nltkClustering(modelDoc2Vec, nrClusters = 8)
+        while True:
+            # setup csv readers (corpus and docs)
+            fCorpus = open ("preproc/preprocListCorpus.csv", "r") 
+            readerCorpus = csv.reader(fCorpus)
 
-    print("LABELS ARE = ", myClusters.labels)
-    myClusters.updateClusterInfo()
-    myClusters.createSetsFromLabels()
-    myClusters.printSets()
+            fDocs = open("preproc/preprocListDocs.csv", "r")
+            readerDocs   = csv.reader(fDocs)
 
-    # This uses Multidimensional Scaling (works only if distMatrix is
-    # symmetric)
-    print("## Starting with MDS ")
-    seed = np.random.RandomState(seed=3)
-    start = timer()
-    mds = manifold.MDS(n_components = 3, metric = True, max_iter = 3000,
-    eps = 1e-9, random_state = seed, dissimilarity = "precomputed", n_jobs =
-    nCores)
-    #  embed3d = mds.fit(dd).embedding_
-    embed3d = mds.fit(distMatrix).embedding_
-    print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
-    myClusters.computeCenters3d(embed3d)
-    create3dChart(myClusters.centers, embed3d, myClusters.labels)
+            chunkSize = math.ceil(totSents/nChunks)
+            print("Tot Sentences = ", totSents, " and Chunks Size = ", chunkSize)
+            p = Pool(nCores)
+
+            target, nTop = readTargetSentence(targetFile)
+            targetTokenized = docPreprocessing(target)
+            tops = Top(nTop)
+
+            print("\n\n")
+            print("*"*80)
+            print("* Query : ", target)
+            print("*"*80)
+            print("\n\n")
+            print("## Reading CHUNKS of preprocessed sentences as lists ...")
+            start = timer()
+            progr = 0
+            bestDist = math.inf
+            for counter in range(nChunks):
+                docs = []
+                corpus = []
+                init = progr
+                till = min(progr + chunkSize, totSents)
+                ending = till-init
+                progr += chunkSize
+
+                print("Chunk [{0:3d}/{1:3d}] =\
+                {2:9d}--{3:9d}/{4:9d}".format(counter+1, nChunks, init+1, till, totSents))
+                for row in itertools.islice(readerCorpus, 0, ending):
+                    #  print(readerCorpus.line_num, "Row corpus = ", row)
+                    corpus.append(row)
+
+                for row in itertools.islice(readerDocs, 0, ending):
+                    #  print(readerDocs.line_num, " == ", row)
+                    docs.append(row)
+
+
+                # one the vocabulary is build, we reprocess the entire corpus
+                docs, corpus = cleanCorpus(modelWord2Vec, docs, corpus)
+                # find top N most similar sentences to target
+                distances = compileWMDSimilarityList(modelWord2Vec,
+                targetTokenized, docs, p)
+                tops = updateList(tops, distances, docs, corpus)
+                if tops.score[0] < bestDist:
+                    bestDist = tops.score[0]
+                    print("Best Match = {0:5.2f} :: {1}".format(tops.score[0], tops.tokenSent[0]))
+                if counter > 0:
+                    break
+            if till != totSents:
+                print("ERROR here : Some sentences have been skipped : ( ", progr,
+                ",", totSents, " )")
+
+            printQueryResults(tops, nTop, toDisk = 1)
+
+            print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
+            print("Do you want to produce a mapping? Choose sentence [1-",nTop,"]\
+            (any other number to exit)")
+            k = int(input())
+            if k > 0 and k <= nTop:
+                source = tops.tokenSent[k-1] 
+                transportationProblem(modelWord2Vec, targetTokenized, source)
+
+            asw = input("Type 'q' to quit. Otherwise, restart.")
+
+            p.close()
+            p.join()
+
+            if asw == "q":
+                break
 
 
 
