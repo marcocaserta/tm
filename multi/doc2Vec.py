@@ -97,6 +97,7 @@ ecco_models_folder = "ecco_models/"
 
 querySol = "topList.txt" #  storing the current best query result
 modelname = "word2vec.model.96-00.100" #  the Word2Vec model used in WMD
+premiumList = "premium/ecco-donut_freqs.txt"
 #  ecco_folders = ["/home/marco/gdrive/research/nlp/data/temp/"]
 
 nCores       =  4
@@ -843,7 +844,7 @@ def createWord2VecModel(docs):
 
     return modelWord2Vec
 
-def cleanCorpus(modelWord2Vec, docs, corpus):
+def cleanCorpus(modelWord2Vec, docs, corpus, premium):
     """
     After the model has been uploaded, some of the preprocessed sentences might
     be removed. The initial preprocessing, which was used to generate the lists
@@ -860,15 +861,38 @@ def cleanCorpus(modelWord2Vec, docs, corpus):
     count = 0
     newDocs = []
     newCorpus = []
+    totP = 0
+    flagged = 0
     for i in range(len(docs)):
-            ss = [w for w in docs[i] if w in modelWord2Vec.wv.vocab]
-            if len(ss) > 2:
-                newDocs.append(ss)
-                newCorpus.append(corpus[i])
-            else:
-                count += 1
+        #  print("-"*80)
+        #  print("doc[{0}] = {1}".format(i, docs[i]))
+        #  print("-"*80)
+        #  for w in docs[i]:
+        #      if w not in premium:
+        #          print(w, " is not in premium")
+        #          totP += 1
+        #      if w not in modelWord2Vec.wv.vocab:
+        #          print(w, " is not in vocab")
 
-    #  print("** ** From cleaning phase, eliminated ", count, " docs ")
+
+        ss = [w for w in docs[i] if (w in modelWord2Vec.wv.vocab and w in
+        premium)]
+        if len(ss) > 2 and len(ss) > int(0.75*len(docs[i])):
+            newDocs.append(ss)
+            newCorpus.append(corpus[i])
+        else:
+            count += 1
+
+
+
+    print("** ** From cleaning phase, eliminated ", count, " docs ")
+    input("aka")
+
+    #  with open('fullPremiumSentences.txt', 'a') as outfile:
+    #      json.dump(newCorpus, outfile)
+    #  with open('docsPremiumSentences.txt', 'a') as outfile:
+    #      json.dump(newDocs, outfile)
+
     return newDocs, newCorpus
 
 
@@ -972,6 +996,18 @@ def printQueryResults(tops, nTop, toDisk = 1):
         print("\n\n")
 
     sys.stdout = sys.__stdout__
+
+def readPremiumList():
+    
+    premium = []
+    with open(path.join(prefix,premiumList), "r") as f:
+        for line in f:
+            w = line.split()[0]
+            if len(w) > 2 and w not in stop_words:
+                premium.append(w)
+    print("len premium = ", len(premium))
+    
+    return premium
 
 
 def main(argv):
@@ -1078,13 +1114,20 @@ def main(argv):
 
     wmd = True
     if wmd:
+        print("Reading premium list ... ")
+        start = timer()
+        premium = readPremiumList()
+        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
         print("## Setting up Word2Vec model ...")
         start = timer()
         modelWord2Vec = createWord2VecModel(docs)
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
 
-        fDocs = open("preproc/preprocListDocs.csv", "r")
+        #  fDocs = open("preproc/preprocListDocs.csv", "r")
+        #  totSents = sum(1 for _ in fDocs)
+        fDocs = open("docsPremiumSentences.txt", "r")
         totSents = sum(1 for _ in fDocs)
         
 
@@ -1093,7 +1136,9 @@ def main(argv):
             fCorpus = open ("preproc/preprocListCorpus.csv", "r") 
             readerCorpus = csv.reader(fCorpus)
 
-            fDocs = open("preproc/preprocListDocs.csv", "r")
+            #  fDocs = open("preproc/preprocListDocs.csv", "r")
+            #  readerDocs   = csv.reader(fDocs)
+            fDocs = open("docsPremiumSentences.txt", "r")
             readerDocs   = csv.reader(fDocs)
 
             chunkSize = math.ceil(totSents/nChunks)
@@ -1133,7 +1178,7 @@ def main(argv):
 
 
                 # one the vocabulary is build, we reprocess the entire corpus
-                docs, corpus = cleanCorpus(modelWord2Vec, docs, corpus)
+                #  docs, corpus = cleanCorpus(modelWord2Vec, docs, corpus, premium)
                 # find top N most similar sentences to target
                 distances = compileWMDSimilarityList(modelWord2Vec,
                 targetTokenized, docs, p)
