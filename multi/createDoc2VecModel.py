@@ -51,7 +51,7 @@ ecco_folders      = ["ecco/ecco_portions/normed/96-00/"]
 #  ecco_folders    = ["/home/marco/gdrive/research/nlp/data/temp/"]
 vocab_folder      = "google_vocab/"
 ecco_models_folder = "ecco_models/"
-modelnameD2V       = "doc2vec.model.all" #  the Word2Vec model used in WMD
+modelnameD2V       = "doc2vec.model" #  the Word2Vec model used in WMD
 
 premiumList       = "premium/ecco-donut_freqs.txt"
 
@@ -59,9 +59,9 @@ preprocListDocs   = "preproc/preprocListDocs.csv"
 preprocListCorpus = "preproc/preprocListCorpus.csv"
 premiumDocs       = "preproc/premiumDocs.csv"
 premiumCorpus     = "preproc/premiumCorpus.csv"
-premiumDocsXRow   = "preproc/premiumDocsXRow.csv"
-premiumCorpusXRow = "preproc/premiumCorpusXRow.csv"
+mappingYears      = "ecco/ecco_portions/year_map.tsv"
 
+period = ["1796", "1797"]
 targetFile = "target.txt"
 
 
@@ -110,7 +110,8 @@ def readPremiumList():
     
     return premium
 
-def readEcco():
+def readEcco(file2year, year):
+
 
     fDocs = open(premiumDocsXRow, "w")
     writerDocs = csv.writer(fDocs)
@@ -125,9 +126,16 @@ def readEcco():
     discarded = 0
     for folder in ecco_folders:
         fullpath = path.join(prefix, folder)
-        totFiles += len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
+        #  totFiles += len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
+        totFiles = sum([file2year[i]==year for i in file2year.keys()])
         countFiles = 0
         for f in listdir(path.join(prefix, folder)):
+            key = f.split(".")[0]
+            #  print("Is ", key, " in dict? ", key in file2year)
+            #  print("Year is ", file2year[key])
+            #  print("Shall we take it ? ", file2year[key]==year)
+            if file2year[key] != year:
+                continue
             countFiles  += 1
             fullname     = fullpath + f
             ff           = open(fullname)
@@ -163,7 +171,7 @@ def readEcco():
 
             print("{0:5d}/{1:5d} :: Reading file {2:10s} ".format(countFiles,
             totFiles, f))
-            if countFiles > 4:
+            if countFiles > 1:
                 break
 
     print("Discarded {0} sentences out of {1}".format(discarded, tot))
@@ -191,6 +199,8 @@ def writeListsPerSentence():
     
 
 def readPremiumLists():
+
+    print("Reading premium sentences from ", premiumDocsXRow)
     
     fCorpus = open (premiumCorpusXRow, "r")
     readerCorpus = csv.reader(fCorpus)
@@ -237,9 +247,9 @@ def transform4Doc2Vec(docs):
     return documents
 
 
-def createDoc2Vec(docs):
+def createDoc2Vec(docs, year):
     
-    print("## Init Doc2Vec Model Creation ...")
+    print("## Init Doc2Vec Model Creation for year {0}...".format(year))
 
     start = timer()
     # instantiate model (note that min_count=2 eliminates infrequent words)
@@ -255,7 +265,10 @@ def createDoc2Vec(docs):
 
     # if we want to save the model on disk (to reuse it later on without
     # training)
-    model.save("doc2vec.model")
+    nn = "doc2vec.model." + year
+    modelname = path.join(prefix,ecco_models_folder,nn)
+    model.save(modelname)
+    print("Doc2Vec model saved ", modelname)
 
     # this can be used if we are done training the model. It will reelase some
     # RAM. The model, from now on, will only be queried
@@ -289,41 +302,82 @@ def targetPreprocessing(doc):
 
     return doc
 
-def main(argv):
+def readMappingYears():
+    fullname = path.join(prefix,mappingYears)
+    #  fullname = "map.temp"
+    print(fullname)
+    filename = []
+    year     = []
+    with open(fullname, "r") as f:
+        for line in f:
+            ff, yy = line.split()
+            #  print(" ff = ", ff, " and yy = ", yy)
+            filename.append(ff)
+            year.append(yy)
 
-    vocabularyBuilding(prefix)
-    if buildDoc2VecModel:
-        premium = readPremiumList()
-        #  # activate this part if we want to read the original files, preprocess them
-        #  # and store one sentence per row
-        docs, corpus, totoFiles = readEcco()
-        #
-        #  # activate this part to create a Doc2Vec model from the list of sentences
-        docs, corpus = readPremiumLists()
-        docs = transform4Doc2Vec(docs)
-        createDoc2Vec(docs)
+    file2year = {f:y for f,y in zip(filename,year)}
+    print("dictionary built")
+    #  print(file2year.keys())
+
+    return file2year
 
     
-    if useDoc2VecModel: 
-        docs, corpus = readPremiumLists()  #  NEEDED ???
-        fullpath = path.join(prefix,ecco_models_folder)
-        fullname = fullpath + modelnameD2V 
-        modelDoc2Vec  = doc2vec.Doc2Vec.load(fullname)
-        target, nTop = readTargetSentence(targetFile)
-        targetTokenized = targetPreprocessing(target)
-        inferred_vector = modelDoc2Vec.infer_vector(targetTokenized)
-        sims = modelDoc2Vec.docvecs.most_similar([inferred_vector], topn=10)
-        idx = [i for i,j in sims]
-        print(idx)
-        print(sims)
-        for i in idx:
+
+
+def main(argv):
+
+    global premiumDocsXRow
+    global premiumCorpusXRow
+    premiumDocsXRowBase   = "preproc/premiumDocsXRow.csv"
+    premiumCorpusXRowBase = "preproc/premiumCorpusXRow.csv"
+    file2year = readMappingYears()
+
+    vocabularyBuilding(prefix)
+    builddoc2vecmodel =False
+    if builddoc2vecmodel:
+        premium = readPremiumList()
+        for year in period:
+            print("Reading and building Doc2Vec for year ", year)
+            premiumDocsXRow = premiumDocsXRowBase + "." + year
+            premiumCorpusXRow = premiumCorpusXRowBase + "." + year
+            #  # activate this part if we want to read the original files, preprocess them
+            #  # and store one sentence per row
+            docs, corpus, totoFiles = readEcco(file2year, year)
+            #
+            #  # activate this part to create a Doc2Vec model from the list of sentences
+            docs, corpus = readPremiumLists()
+            docs = transform4Doc2Vec(docs)
+            createDoc2Vec(docs, year)
+
+    usedoc2vecmodel =True
+    if usedoc2vecmodel: 
+        for year in period:
+            premiumDocsXRow = premiumDocsXRowBase + "." + year
+            premiumCorpusXRow = premiumCorpusXRowBase + "." + year
             print("="*80)
-            print(corpus[i-1])
-            print("-"*80)
-            print(corpus[i])
-            print("-"*80)
-            print(corpus[i+1])
+            print("* Year ", year)
             print("="*80)
+            docs, corpus = readPremiumLists()  #  NEEDED ???
+            fullpath = path.join(prefix,ecco_models_folder)
+            print("Loading ", modelnameD2V, ".", year)
+            fullname = fullpath + modelnameD2V +"." + year
+            modelDoc2Vec  = doc2vec.Doc2Vec.load(fullname)
+            target, nTop = readTargetSentence(targetFile)
+            targetTokenized = targetPreprocessing(target)
+            inferred_vector = modelDoc2Vec.infer_vector(targetTokenized)
+            sims = modelDoc2Vec.docvecs.most_similar([inferred_vector], topn=10)
+            print(sims)
+            for i,j in sims:
+                print("="*80)
+                print("Keywords({0}) = {1:5.3f} :: {2}".format(i, j, docs[i]))
+                print("="*80)
+                print(corpus[i-1][0])
+                print("-"*80)
+                print("** ", corpus[i][0])
+                print("-"*80)
+                print(corpus[i+1][0])
+                print("="*80)
+                print("\n")
 
 if __name__ == '__main__':
     main(sys.argv[1:])

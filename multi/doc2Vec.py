@@ -1156,19 +1156,6 @@ def main(argv):
                     print(doc)
 
 
-                # one the vocabulary is build, we reprocess the entire corpus
-                #  docs, corpus = cleanCorpus(modelWord2Vec, docs, corpus, premium)
-                # find top N most similar sentences to target
-                
-                #  docs = transform4Doc2Vec(docs)
-                #  sims = compileDoc2VecSimilarityList(modelDoc2Vec, targetTokenized,
-                #  docs, nTop)
-                #  print("topN = ", nTop, " and ", sims)
-                #  for i,j in sims:
-                #      print("s({0}) = {1:5.2f} = {2}".format(i, j, corpus[i]))
-                #  exit(123)
-
-
                 distances = compileWMDSimilarityList(modelWord2Vec,
                 targetTokenized, docs, p)
                 tops = updateList(tops, distances, docs, corpus)
