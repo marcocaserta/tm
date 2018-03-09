@@ -26,6 +26,7 @@
 
 """
 import sys
+import logging
 import csv
 import json
 import itertools
@@ -198,9 +199,9 @@ def writeListsPerSentence():
     exit(111)
     
 
-def readPremiumLists():
+def readPremiumLists(year):
 
-    print("Reading premium sentences from ", premiumDocsXRow)
+    print("Reading premium sentences for year ", year, " from ", premiumDocsXRow)
     
     fCorpus = open (premiumCorpusXRow, "r")
     readerCorpus = csv.reader(fCorpus)
@@ -253,7 +254,8 @@ def createDoc2Vec(docs, year):
 
     start = timer()
     # instantiate model (note that min_count=2 eliminates infrequent words)
-    model = doc2vec.Doc2Vec(size = 300, window = 300, min_count = 2, iter = 300, workers = nCores, dm=0)
+    model = doc2vec.Doc2Vec(size = 300, window = 300, min_count = 2, iter =
+    300, workers = nCores, dm=0, max_vocab_size=10000)
 
     # we can also build a vocabulary from the model
     model.build_vocab(docs)
@@ -303,20 +305,19 @@ def targetPreprocessing(doc):
     return doc
 
 def readMappingYears():
+
     fullname = path.join(prefix,mappingYears)
-    #  fullname = "map.temp"
     print(fullname)
     filename = []
     year     = []
     with open(fullname, "r") as f:
         for line in f:
             ff, yy = line.split()
-            #  print(" ff = ", ff, " and yy = ", yy)
             filename.append(ff)
             year.append(yy)
 
     file2year = {f:y for f,y in zip(filename,year)}
-    print("dictionary built")
+    print("Mapping filename -> year built ...")
     #  print(file2year.keys())
 
     return file2year
@@ -333,7 +334,7 @@ def main(argv):
     file2year = readMappingYears()
 
     vocabularyBuilding(prefix)
-    builddoc2vecmodel =False
+    builddoc2vecmodel =True
     if builddoc2vecmodel:
         premium = readPremiumList()
         for year in period:
@@ -345,11 +346,11 @@ def main(argv):
             docs, corpus, totoFiles = readEcco(file2year, year)
             #
             #  # activate this part to create a Doc2Vec model from the list of sentences
-            docs, corpus = readPremiumLists()
+            docs, corpus = readPremiumLists(year)
             docs = transform4Doc2Vec(docs)
             createDoc2Vec(docs, year)
 
-    usedoc2vecmodel =True
+    usedoc2vecmodel =False
     if usedoc2vecmodel: 
         for year in period:
             premiumDocsXRow = premiumDocsXRowBase + "." + year
@@ -357,7 +358,7 @@ def main(argv):
             print("="*80)
             print("* Year ", year)
             print("="*80)
-            docs, corpus = readPremiumLists()  #  NEEDED ???
+            docs, corpus = readPremiumLists(year)  #  NEEDED ???
             fullpath = path.join(prefix,ecco_models_folder)
             print("Loading ", modelnameD2V, ".", year)
             fullname = fullpath + modelnameD2V +"." + year
@@ -380,6 +381,11 @@ def main(argv):
                 print("\n")
 
 if __name__ == '__main__':
+    #  logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
+    logging.basicConfig(
+        format='%(asctime)s : %(threadName)s : %(levelname)s : %(message)s',
+        level=logging.INFO
+    )
     main(sys.argv[1:])
     #unittest.main()
 

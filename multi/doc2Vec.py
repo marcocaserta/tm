@@ -23,14 +23,12 @@
 
  Author: Marco Caserta (marco dot caserta at ie dot edu)
  Started : 02.02.2018
- Updated : 27.02.2018
+ Updated : 27.02.2018 -> introduction of a cycle
+           09.03.2018 -> shortlist creation using Doc2Vec (per year)
  Ended   :
 
  Command line options (see parseCommandLine):
--t type of distance computation approach used
-    -t 1 : doc2vec
-    -t 2 : WMD (word mover's distance)
-    -t 3 : type of clustering algorithm used (k.means)
+ -s name of file containing the target sentence, i.e., the query
 
 NOTE: This code is based on the tutorial from:
 
@@ -42,6 +40,38 @@ The idea is to work on the documents of the ECCO dataset at a sentence level.
 Given a "reference sentence," we want to find the list of sentences closer to
 the target in a given pool of sentences. Note that the dataset must be
 organized at a sentence level.
+
+As of today, this can be achieved in a number of ways. We explore:
+- doc2vec, which provides an embeddding for each document
+- wmd, which transforms a sentence into another solving a transportation pbr
+
+We observed that the doc2vec query is pretty fast, with the advantage that the
+actual doc2vec model can be precomputed. Once the doc2vec model is available,
+computing the distance between a query sentence and any of the documents in the
+corpus is quite fast. In contrast, wmd is computationally intensive. Therefore,
+the idea is to use both of them in sequence:
+1. use doc2vec on the premium set of sentences for a given time period retrieve
+the N most similar sentences (N can be quite large here). Let us call this list
+the "shortlist".
+2. use the N sentences retrieved in the previous step (i.e., the shortlist) as
+input to the wmd algorithm. Since N << number of premium sentences << original
+number of sentences (i.e., before applying the premium list filter), wmd is
+able to provide an answer in an amount of time which depends on N.
+
+Why not just using doc2vec? It seems the similarity measure produced by wmd
+outperforms the one given by doc2vec. In addition, it allows to use any
+embedding (not just the one provided by word2vec) to assign a numerical vector
+to each word of the document.
+
+The high-level structure of the algorithm is thus as follows:
+for each year in the period:
+    read premium lists for that year and the corresponding doc2vec model
+    get the N/(nr.years) best sentences w.r.t. the query sentence
+    store the shortlist into the docs and corpus structure
+At this point, docs and corpus contain the shortlists built over all the years
+of the period under analysis. Pass docs to wmd and get the top list (i.e., the
+very limited, human readable, set of sentences that are the closest to the
+query.)
 
 """
 
@@ -68,26 +98,14 @@ from gensim.similarities import WmdSimilarity
 from gensim.corpora.dictionary import Dictionary
 
 from sklearn.metrics.pairwise import pairwise_distances
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from sklearn import metrics
 from sklearn import manifold
 import plotly
 import plotly.plotly as py
 import plotly.graph_objs as go
 
-import scipy.spatial.distance as ssd
-from scipy.cluster.hierarchy import dendrogram, linkage
-from scipy.cluster.hierarchy import cophenet
-from scipy.cluster.hierarchy import fcluster
-from scipy.spatial.distance import pdist
-
-from collections import namedtuple
-
 from nltk import word_tokenize
 from nltk import sent_tokenize
 from nltk.corpus import stopwords
-
 stop_words = stopwords.words("english")
 
 prefix             = path.expanduser("~/gdrive/research/nlp/data/")
@@ -97,18 +115,20 @@ ecco_models_folder = "ecco_models/"
 
 querySol           = "topList.txt" #  storing the current best query result
 modelnameW2V       = "word2vec.model.96-00.100" #  the Word2Vec model used in WMD
-modelnameD2V       = "doc2vec.model.all" #  the Word2Vec model used in WMD
+modelnameD2V       = "doc2vec.model" #  the Word2Vec model used in WMD
 premiumList        = "premium/ecco-donut_freqs.txt"
 premiumDocs        = "preproc/premiumDocs.csv"
 premiumCorpus      = "preproc/premiumCorpus.csv"
-premiumDocsXRow    = "preproc/premiumDocsXRow.csv"
-premiumCorpusXRow  = "preproc/premiumCorpusXRow.csv"
+premiumDocsXRowBase    = "preproc/premiumDocsXRow.csv"
+premiumCorpusXRowBase  = "preproc/premiumCorpusXRow.csv"
 #  ecco_folders    = ["/home/marco/gdrive/research/nlp/data/temp/"]
 
 nCores       =  4
 totFiles     = -1
-nChunks      = 10
+nChunks      = 1
+nPerYear     = 100
 
+period = ["1796", "1797"]
 
 class Top:
     """
@@ -152,11 +172,11 @@ def parseCommandLine(argv):
         elif opt in ("-s", "--sentence"):
             targetFile = arg
 
-    if distanceType == -1:
-        print("Error : Distance type not defined. Select one using -t : ")
-        print("\t 1 : Cosine similarity (document-wise)")
-        print("\t 2 : Word Mover's Distance (word-wise)")
-        sys.exit(2)
+    #  if distanceType == -1:
+    #      print("Error : Distance type not defined. Select one using -t : ")
+    #      print("\t 1 : Cosine similarity (document-wise)")
+    #      print("\t 2 : Word Mover's Distance (word-wise)")
+    #      sys.exit(2)
     if targetFile == "":
         print("Error: Target sentence file not defined. Select one using -s\
         <namefile>")
@@ -175,34 +195,10 @@ def readTargetSentence(targetFile):
     ff.close()
     return target, nTop
 
-def listOfFiles():
-    """
-    This is used to create the list of tasks in reading files. These tasks are
-    then passed to the parallel version of the reading. But, at this moment, it
-    does not work.
-    """
-    
-    i = -1
-    fullList = []
-    for folder in ecco_folders:
-        i += 1
-        fullpath = path.join(prefix, folder)
-        totFiles = len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
-        countFiles = 0
-        for f in listdir(path.join(prefix, folder)):
-            #  if f != "1780100800.clean.txt":
-                #  continue
-
-            countFiles += 1
-            fullname = fullpath + f
-            fullList.append(fullname)
-
-            if countFiles > 3:
-                break
-
-    return fullList, totFiles
-
 def readEccoParallel(namefile):
+    """
+    Maybe for future uses. I am not able to make it work.
+    """
 
     print("Reading ", namefile)
     docs = []
@@ -219,95 +215,28 @@ def readEccoParallel(namefile):
     print("Returning :", docs, " AND ", sentences)
     return zip(*docs, *sentences)
 
-def readEcco():
-
-    i = -1
-    docs = []
-    sentences = []
-    totFiles = 0
-    for folder in ecco_folders:
-        i += 1
-        fullpath = path.join(prefix, folder)
-        totFiles += len(fnmatch.filter(os.listdir(fullpath), '*.txt'))
-        countFiles = 0
-        for f in listdir(path.join(prefix, folder)):
-            #  if f != "1780100800.clean.txt":
-                #  continue
-
-            countFiles += 1
-            fullname = fullpath + f
-            ff = open(fullname)
-            sents = sent_tokenize(ff.read())
-            for sent in sents:
-                words = [w.lower() for w in word_tokenize(sent)]
-                words = [w for w in words if w.isalpha() and w not in
-                stop_words and w in vocab_dict]
-                if len(words) > 2:
-                    docs.append(words)
-                    sentences.append([sent])
-
-            print("{0:5d}/{1:5d} :: Reading file {2:10s} ".format(countFiles,
-            totFiles, f))
-            if countFiles > 1:
-                break
-
-    return docs, sentences, totFiles
-
-
-def vocabularyBuilding(prefix):
-    '''
-    Build embeddings and vocabulary based on Google News set (1.5Gb and 3M
-    words and phrases based on 100B words from Google News)
-    '''
-
-    global vocab_dict
-
-    # create dictionary first, using google list
-    fullpath = path.join(prefix, vocab_folder)
-    #  fullname = fullpath + "embed.dat"
-    namevocab = fullpath + "embed500.vocab"
-    with open(namevocab) as f:
-        vocab_list = map(str.strip, f.readlines())
-    vocab_dict = {w: k for k, w in enumerate(vocab_list)}
-    print("Vocabulary read from disk ... ")
-
-
-    #  print("Reading model from disk ")
-    #  start = timer()
-    #  #  gPath = fullpath + "GoogleNews-vectors-negative300.bin.gz"
-    #  #  model = KeyedVectors.load_word2vec_format(gPath, binary=True,
-    #  #  limit=500000)
-    #  filename = fullpath + "embed500.model"
-    #  #  model = KeyedVectors.load(filename, mmap="r")
-    #  model = KeyedVectors.load(filename)
-    #  model.init_sims(replace=True)
-    #  print("Done in ", timer()-start, " time")
-
-    #  return model
-
-
-
-
 def printSummary(totFiles, docs):
     from scipy import stats
 
     lengths = np.array([len(sent) for sent in docs])
     qq = stats.mstats.mquantiles(lengths, prob=[0.0, 0.25, 0.50, 0.75, 1.10])
 
+    print("\n\n====================================================")
+    print("marco caserta (c) 2018 - WMD ")
     print("====================================================")
-    print("\n\nmarco caserta (c) 2018 ")
-    print("====================================================")
-    print("Nr. Files             : {0:>25d}".format(totFiles))
-    print("Nr. Sentences         : {0:>25d}".format(len(docs)))
-    print("Avg. Length           : {0:>25.2f}".format(lengths.mean()))
-    print(" Min                  : {0:>25.2f}".format(qq[0]))
-    print(" Q1                   : {0:>25.2f}".format(qq[1]))
-    print(" Q2                   : {0:>25.2f}".format(qq[2]))
-    print(" Q3                   : {0:>25.2f}".format(qq[3]))
-    print(" Max                  : {0:>25.2f}".format(qq[4]))
+    print("* Nr. Files            : {0:>25d} *".format(totFiles))
+    print("* Nr. Sentences        : {0:>25d} *".format(len(docs)))
+    print("* Avg. Length          : {0:>25.2f} *".format(lengths.mean()))
+    print("*  Min                 : {0:>25.2f} *".format(qq[0]))
+    print("*  Q1                  : {0:>25.2f} *".format(qq[1]))
+    print("*  Q2                  : {0:>25.2f} *".format(qq[2]))
+    print("*  Q3                  : {0:>25.2f} *".format(qq[3]))
+    print("*  Max                 : {0:>25.2f} *".format(qq[4]))
 
-    print("\n * Distance Type      : {0:>25s}".format(distanceType))
+    print("\n")
+    print("* Distance Type        : {0:>25s} *".format("WMD"))
     print("====================================================")
+    print("\n")
 
 
     return
@@ -335,41 +264,6 @@ def printSummary(totFiles, docs):
 
     return
 
-
-def nltkPreprocessing(docs, sentences, doc):
-    """
-    Document preprocessing using NLTK:
-    - tokenize document
-    - remove stopwords (currently using stopwords list from nltk.corpus)
-    - remove numbers and punctuation (using a function from nltk)
-    - remove infrequent words
-    """
-
-    #  doc = doc.lower()
-    sents = sent_tokenize(doc)
-    i = 0
-    for ss in sents: # all the sentences in this document
-        words = [w.lower() for w in word_tokenize(ss)]
-        #  words = [w for w in words if w.isalpha() and w not in stop_words and w
-        #  in vocab_dict]
-        words = [w for w in words if w.isalpha() and w not in stop_words]
-        if len(words) > 2:
-            docs.append(words)
-            sentences.append([ss])
-            i += 1
-
-        if i > 10:
-            return
-
-def targetPreprocessing(doc):
-
-    doc = word_tokenize(doc)
-    doc = [w.lower() for w in doc if w.lower() not in stop_words] # remove stopwords
-
-    doc = [w for w in doc if w.isalpha()] # remove numbers and pkt
-    #  doc = [w for w in doc if w.isalpha() and w in vocab_dict] # remove numbers and pkt
-
-    return doc
 
 def docPreprocessing(doc, modelWord2Vec):
 
@@ -414,129 +308,6 @@ def transform4Doc2Vec(docs):
     return documents
 
 
-def applyDoc2Vec(docs):
-    """
-
-    This returns a vector for each document of the corpus, based on shallow
-    neural network (as in word2vec). The vocabulary used for training is built
-    from the corpus itself (as opposed to using a vocabulary from Google News,
-    or any other source.)
-
-    Parameters of Doc2Vec are:
-    - size : embedding vector size
-    - window : looking before and after the current word
-    - min_count : consider only words with that frequence or above
-    - iter : number of iterations over the corpus
-    - dm : with 0, deactivate DBoW (this seems to produce better results)
-
-    Once the model has been obtained, to get the vector associated to a doc,
-    just use:
-    > print(model.docvecs[document_tag_here]
-    """
-    
-    fullpath = path.join(prefix,ecco_models_folder)
-    fullname = fullpath + modelnameD2V 
-    print("fullname is ", fullname)
-    if os.path.exists(fullname):
-        print(">>> Doc2Vec model was read from disk ({0})".format(modelnameW2V))
-        modelDoc2Vec = doc2vec.Doc2Vec.load(fullname)
-        #  model = KeyedVectors.load_word2vec_format(fullname, encoding="utf-8")
-        modelDoc2Vec.init_sims(replace=True)
-
-        return modelDoc2Vec
-
-    # instantiate model (note that min_count=2 eliminates infrequent words)
-    model = doc2vec.Doc2Vec(size = 300, window = 300, min_count = 2, iter
-    = 300, workers = 4, dm=0)
-
-    # we can also build a vocabulary from the model
-    model.build_vocab(docs)
-    #  print("Vocabulary was built : ", model.wv.vocab.keys(), " ----> this is a voc")
-
-    # train the model
-    model.train(docs, total_examples=model.corpus_count, epochs=model.iter)
-
-    # if we want to save the model on disk (to reuse it later on without
-    # training)
-    model.save("doc2vec.model")
-
-    # this can be used if we are done training the model. It will reelase some
-    # RAM. The model, from now on, will only be queried
-    model.delete_temporary_training_data(keep_doctags_vectors=True, keep_inference=True)
-
-    return model
-
-def compileDoc2VecSimilarityList(model, target, docs, N):
-    """
-    We want to create a list of the top N most similar sentences w.r.t. the
-    target sentence.
-    """
-
-    print("target here = ", target)
-    inferred_vector = model.infer_vector(target)
-    sims = model.docvecs.most_similar([inferred_vector], topn=N)
-
-    return sims
-
-
-def computeDocsSimilarities(model, docs):
-    """
-    Compute similarity score among documents using the "most_similar()" function
-    of doc2vec. This function finds the top n most similar documents with
-    respect to the input vector. Similarity is based on cosine.
-
-    This function can be called only after the creation of "model," i.e., the
-    Doc2Vec model created in "applyDoc2Vec()".
-
-    Similarities can be computed in two ways:
-    - using the original document vector (stored in model.docvecs[doc_id]
-    - using a "recomputed", i.e., inferred vector
-
-    This distinction is interesting. If one uses the original score, the method 
-    is deterministic, since the original vector obtained using Doc2Vec does not
-    change. On the other hand, if we want to treat the corpus as training, we
-    might want to recompute the vector associated to each document, as if
-    each document now were unseen, new.
-
-    The inferred function is also useful when a new document, i.e., not part of
-    the corpus used for training, is now provided in input.
-
-    To infer a vector for a document, use:
-    > inferred_vector = model.infer_vector(new_doc)
-
-    To reuse the vector obtained during the model training phase, use:
-    > vector = model.docvecs[doc_id]
-    """
-
-    nDocs = len(docs)
-    vals = [ [0.0 for i in range(nDocs)] for j in range(nDocs)]
-    for doc_id in range(nDocs):
-        inferred_vector = model.docvecs[doc_id]
-        #  inferred_vector = model.infer_vector(docs[doc_id].words)
-        sims = model.docvecs.most_similar([inferred_vector], topn =
-        len(model.docvecs))
-
-        # store similarity values in a matrix
-        # Note: We are storing DISTANCES, not similarities
-        for i,j in sims:
-            if vals[doc_id][i] == 0.0:
-                vals[doc_id][i] = round(1.0-j,4) # round is needed to symmetry
-                vals[i][doc_id] = round(1.0-j,4) # round is needed to symmetry
-
-
-    # save similarity matrix on disk
-    f = open("similarityDoc2Vec.txt", "w")
-    for i in range(nDocs):
-        for j in range(nDocs):
-            f.write("{0:4.2f}\t".format(vals[i][j]))
-        f.write("\n")
-    f.close()
-
-    print("... similarity written on disk file 'similarityDoc2Vec.txt' ")
-
-    return vals
-
-
 def trainingModel4wmd(corpus):
     """
     Training a model to be used in WMD.
@@ -561,102 +332,6 @@ def trainingModel4wmd(corpus):
 
     return model
 
-
-def wmd4Docs(target, docs):
-    """
-    Use Word Mover's Distance for the entire corpus. We create a corpus based
-    on (a subset of) the documents in docs. Next, we train the model using the
-    gensim function. The model is stored into "model".
-
-    NOTE: In this version, we do now use a pre-processing for this phase. We
-    take the unprocessed corpus and create a Word2Vec model from there. Then,
-    depending on the max_count threshold used, we migth have to eliminate some
-    words from the corpus, if we use the Transportation problem.
-    """
-
-    if os.path.exists("11similarityWMD.csv"):
-        print(" ... reading WMD matrix from disk ...")
-        start = timer()
-        vals = []
-
-        reader = csv.reader(open("similarityWMD.csv", "r"), delimiter=",")
-        x = list(reader)
-        vals = np.array(x).astype("float")
-        print(" ... Done in {0:5.2f} seconds.\n".format(timer()-start))
-        return vals
-
-
-    if os.path.exists("word2vec.model"):
-        print(">>> Word2Vec model was read from disk ")
-        modelWord2Vec = Word2Vec.load("word2vec.model")
-    else:
-
-        # extra step to eliminate some of the sentences from the corpus
-        wmd_corpus = []
-        for doc in docs:
-            #  doc = nltkPreprocessing(doc) # already done outside
-            wmd_corpus.append(doc)
-
-
-        print("## Building model for WMD .... ")
-        start = timer()
-        modelWord2Vec = trainingModel4wmd(wmd_corpus)
-        modelWord2Vec.save("word2vec.model")
-        print("... Done in {0:5.2f} seconds.\n".format(timer()-start))
-        print("         (Word2Vec model saved on disk - 'word2vec.model')")
-
-    print ("## Computing distances using WMD (parallel version [p={0}])\
-    ...".format(nCores))
-
-    for i in range(len(wmd_corpus)):
-        res = modelWord2Vec.wmdistance(target, wmd_corpus[i])
-        print("Result WMD = ", res)
-
-    #  getMostSimilarWMD(modelWord2Vec, [], [], 0)
-    transportationProblem(modelWord2Vec, [], [], [])
-    input("aka")
-
-
-    nDocs = len(wmd_corpus)
-    start = timer()
-    # create list of tasks for parallel processing
-    tasks = []
-    for i in range(nDocs):
-        for j in range(i+1,nDocs):
-            tasks.append([docs[i],docs[j]])
-
-    p = Pool(nCores)
-    #  results = p.starmap(model.wmdistance, product(docs, repeat=2))
-    results = p.starmap(modelWord2Vec.wmdistance, tasks)
-    p.close()
-    p.join()
-    print("... done with distance computation in {0:5.2f} seconds.\n".format(timer()-start))
-
-
-    print("Copying matrix ...")
-    start = timer()
-    # copy upper triangular vector into matrix
-    vals = [ [0 for i in range(nDocs)] for j in range(nDocs)]
-    progr = 0
-    for i in range(nDocs):
-        for j in range(i):
-            vals[i][j] = vals[j][i]
-        for j in range(i+1,nDocs):
-            vals[i][j] = results[progr]
-            progr += 1
-            
-    print("... Done in {0:5.2f} seconds.\n".format(timer()-start))
-
-    # save matrix on disk
-    csvfile = "similarityWMD.csv.temp"
-    with open(csvfile, "w") as output:
-        writer = csv.writer(output, lineterminator='\n')
-        writer.writerows(vals)
-
-    print("Word Mover's Distances written on disk file 'similarityWMD.csv' ")
-    input("aka")
-    
-    return vals
 
 def getMostSimilarWMD(model, corpus, target, nTop):
     """
@@ -856,7 +531,7 @@ def solveTransport(matrixC, cap, dem):
 
     return [z, x_sol]
 
-def createWord2VecModel(docs):
+def loadWord2VecModel():
     """
     Read or create a Word2Vec model (depending on whether the one defined in
     the header of this file actually exists.).
@@ -867,69 +542,11 @@ def createWord2VecModel(docs):
     if os.path.exists(fullname):
         print(">>> Word2Vec model was read from disk ({0})".format(modelnameW2V))
         modelWord2Vec = Word2Vec.load(fullname)
-        #  model = KeyedVectors.load_word2vec_format(fullname, encoding="utf-8")
         modelWord2Vec.init_sims(replace=True)
     else:
-        print("## Building word2vec model for WMD ...")
-        start = timer()
-        modelWord2Vec = trainingModel4wmd(docs)
-        modelWord2Vec.save("word2vec.model")
-        print("... Done in {0:5.2f} seconds.\n".format(timer()-start))
-        print("         (Word2Vec model saved on disk - 'word2vec.model')")
+        print("ERROR ::: Word2Vec model not available!")
 
     return modelWord2Vec
-
-def cleanCorpus(modelWord2Vec, docs, corpus, premium):
-    """
-    After the model has been uploaded, some of the preprocessed sentences might
-    be removed. The initial preprocessing, which was used to generate the lists
-    stored on disk, was based on the google dictionary. However, at this point,
-    we have a model, and a corresponding dictionary. We need to ensure that all
-    the words in the corpus at this point are in the dictionary.
-    """
-
-    if len(docs) != len(corpus):
-        print(len(docs), " vs ", len(corpus))
-        print("ERROR : Two different lengths in original and preprocessed docs")
-        exit(123)
-
-    count = 0
-    newDocs = []
-    newCorpus = []
-    totP = 0
-    flagged = 0
-    for i in range(len(docs)):
-        #  print("-"*80)
-        #  print("doc[{0}] = {1}".format(i, docs[i]))
-        #  print("-"*80)
-        #  for w in docs[i]:
-        #      if w not in premium:
-        #          print(w, " is not in premium")
-        #          totP += 1
-        #      if w not in modelWord2Vec.wv.vocab:
-        #          print(w, " is not in vocab")
-
-
-        ss = [w for w in docs[i] if (w in modelWord2Vec.wv.vocab and w in
-        premium)]
-        if len(ss) > 2 and len(ss) > int(0.75*len(docs[i])):
-            newDocs.append(ss)
-            newCorpus.append(corpus[i])
-        else:
-            count += 1
-
-
-
-    print("** ** From cleaning phase, eliminated ", count, " docs ")
-    input("aka")
-
-    #  with open('fullPremiumSentences.txt', 'a') as outfile:
-    #      json.dump(newCorpus, outfile)
-    #  with open('docsPremiumSentences.txt', 'a') as outfile:
-    #      json.dump(newDocs, outfile)
-
-    return newDocs, newCorpus
-
 
 
 def compileWMDSimilarityList(modelWord2Vec, target, docs, p):
@@ -964,11 +581,9 @@ def compileWMDSimilarityList(modelWord2Vec, target, docs, p):
     #  transportationProblem(modelWord2Vec, target, source)
     #  print("... done with distance computation in {0:5.2f} seconds.\n".format(timer()-start))
 
-    #  return sims
-    #  return idx, distances
     return results
 
-def updateList(tops, distances, docs, corpus):
+def updateList(tops, distances, docs, corpus, previous, post):
     """
     Update list of top N best results.
     This can be improved.
@@ -986,16 +601,9 @@ def updateList(tops, distances, docs, corpus):
     topAux = Top(nTop)
     for i in range(nTop):
         topAux.score[i] = dist[idx[i]]
-        # special cases for first and last sentence of the chunk
         if idx[i] < nDocs:
-            if idx[i] == 0:
-                topAux.previous[i] = "*"
-            else:
-                topAux.previous[i] = corpus[idx[i]-1]
-            if idx[i] == len(distances)-1:
-                topAux.next[i] = "*"
-            else:
-                topAux.next[i] = corpus[idx[i]+1]
+            topAux.previous[i]  = previous[idx[i]]
+            topAux.next[i]      = post[idx[i]]
             topAux.tokenSent[i] = docs[idx[i]]
             topAux.sent[i]      = corpus[idx[i]]
         else:
@@ -1010,6 +618,10 @@ def updateList(tops, distances, docs, corpus):
     return topAux
 
 def printQueryResults(tops, nTop, toDisk = 1):
+    """
+    Print, either to screen or to file, the list of sentences closest to the
+    query. This is called every time a new best solution is found.
+    """
 
     # dump it to file or print it to screen
     if toDisk == 1:
@@ -1018,11 +630,15 @@ def printQueryResults(tops, nTop, toDisk = 1):
     print("** ** ** Target sentence : ", target)
     for i in range(nTop):
         print("="*80)
+        print("Keywords({0}) = {1:5.3f} :: {2}".format(i+1, tops.score[i],
+        tops.tokenSent[i]))
+        print("="*80)
         ss = ", ".join( repr(e) for e in tops.previous[i] )
         print(ss)
         print("-"*80)
         ss = ", ".join( repr(e) for e in tops.sent[i])
-        print("dist({0:2d}) = {1:5.2f} :: {2}".format(i+1, tops.score[i], ss))
+        #  print("dist({0:2d}) = {1:5.2f} :: {2}".format(i+1, tops.score[i], ss))
+        print("** ", ss)
         print("-"*80)
         ss = ", ".join( repr(e) for e in tops.next[i] )
         print(ss)
@@ -1032,164 +648,168 @@ def printQueryResults(tops, nTop, toDisk = 1):
 
     sys.stdout = sys.__stdout__
 
-def readPremiumList():
-    
-    premium = []
-    with open(path.join(prefix,premiumList), "r") as f:
-        for line in f:
-            w = line.split()[0]
-            if len(w) > 2 and w not in stop_words:
-                premium.append(w)
-    print("len premium = ", len(premium))
-    
-    return premium
 
+def readPremiumLists():
+    """
+    The premium sentences are those sentences obtained after preprocessing,
+    i.e., docs are already tokenized (while corpus retains the original
+    sentence), isalpha(), stopw_words, etc. have been applied, and, in
+    addition, words that are not in the vocabulary and in the premium list have
+    been removed (see createDoc2VecModel.py for more details on how these lists
+    have been produced.)
+    """
+
+    print(" .. Reading premium sentences from ", premiumDocsXRow)
+    fDocs = open(premiumDocsXRow, "r")
+    totSents = sum(1 for _ in fDocs)
+    print(" .. Tot sentences = ", totSents)
+
+    fCorpus = open (premiumCorpusXRow, "r")
+    readerCorpus = csv.reader(fCorpus)
+    fDocs = open(premiumDocsXRow, "r")
+    readerDocs   = csv.reader(fDocs)
+   
+    corpus = []
+    docs   = []
+    for row in itertools.islice(readerCorpus, 0, totSents):
+        #  print(readerCorpus.line_num, "Row corpus = ", row)
+        corpus.append(row)
+
+    for row in itertools.islice(readerDocs, 0, totSents):
+        #  print(readerDocs.line_num, "Row docs = ", row)
+        docs.append(row)
+
+    return docs, corpus, totSents
+
+def shortlistDoc2Vec(year, targetTokenized, docs, corpus, totSents):
+    """
+    Based on the doc2vec.model.year model, the top N sentences for the current
+    year are retrieved and stored in a temporary data structure. These
+    sentences are eventually appended to docs and corpus, this entering in the
+    shortlist to be used by wmd.
+    """
+
+    docsNew   = []
+    corpusNew = []
+    previous  = []
+    post      = []
+
+    namefile = modelnameD2V + "." + year
+    fullpath = path.join(prefix,ecco_models_folder)
+    print(" .. Loading ", namefile)
+    fullname = fullpath + namefile
+    modelDoc2Vec  = doc2vec.Doc2Vec.load(fullname)
+    inferred_vector = modelDoc2Vec.infer_vector(targetTokenized)
+    nSelected = min(nPerYear, totSents)
+    sims = modelDoc2Vec.docvecs.most_similar([inferred_vector], topn=nSelected)
+    for i,j in sims:
+        docsNew.append(docs[i])
+        corpusNew.append(corpus[i])
+        if i > 0:
+            previous.append(corpus[i-1])
+        else:
+            previous.append("**")
+        if i < totSents-1:
+            post.append(corpus[i+1])
+        else:
+            post.append("**")
+
+    return docsNew, corpusNew, previous, post
 
 def main(argv):
     '''
-    Entry point.
+    The Word Mover Distance (WMD) implementation for the ECCO dataset.
     '''
 
     global target
     global nTop
+    global premiumDocsXRow
+    global premiumCorpusXRow
 
-    docsAux    = [] #  the original documents, as read from disk
     docs       = [] #  the documents in format required by doc2vec
     corpus     = [] #  the documents after preprocessing (not fit for doc2vec)
     distMatrix = [] #  the distance matrix used by hierarchical clustering
+    previous   = [] #  previous sentence in the shortlist
+    post       = [] #  next sentence in the shortlist
 
     parseCommandLine(argv)
-    #  vocabularyBuilding(prefix)
 
-    docToVec = False
-    if docToVec == True:
-        print("## Init Document Transformation for Doc2Vec...")
-        start = timer()
-        # add tags to documents (required by doc2vec)
-        docs = transform4Doc2Vec(docs) 
-        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+    start = timer()
 
-        print("## Init Doc2Vec Model Creation ...")
-        start = timer()
-        modelDoc2Vec = applyDoc2Vec(docs)
-        print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
-        
-        similarityList = compileDoc2VecSimilarityList(modelDoc2Vec,
-        targetTokenized, docs, nTop)
-        print("Target sentence : ", target)
-        print("="*80)
-        for i,j in similarityList:
-            ss = ", ".join( repr(e) for e in corpus[i] )
-            print("s[{0:5d}] = {1:5.2f} :: {2}".format(i, j, ss))
+    print("## Setting up Word2Vec model ...")
+    modelWord2Vec = loadWord2VecModel()
+    print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
+
+    while True:
+        targetTokenized = -1
+        while targetTokenized == -1:
+            target, nTop = readTargetSentence(targetFile)
+            targetTokenized = docPreprocessing(target, modelWord2Vec)
+            if targetTokenized == -1:
+                input("Fix the target file and press any key to continue\
+                ('target.txt')")
+            else:
+                print("\n\n")
+                print("*"*80)
+                print("* Query : ", target)
+                print("*"*80)
+                print("\n\n")
+
+        tops     = Top(nTop)
+        start    = timer()
+        bestDist = math.inf
+
+        p = Pool(nCores) #  used for parallel processing of WMD
+
+        for year in period:
+
+            premiumDocsXRow   = premiumDocsXRowBase + "." + year
+            premiumCorpusXRow = premiumCorpusXRowBase + "." + year
+            print("="*80)
+            print("* Year ", year)
             print("="*80)
 
-        exit(111)
+            docsD2V, corpusD2V, totSents = readPremiumLists()  
+            docsAux, corpusAux, previousAux, postAux = shortlistDoc2Vec(year,
+            targetTokenized, docsD2V, corpusD2V, totSents)
+            for i in range(len(docsAux)):
+                docs.append(docsAux[i])
+                corpus.append(corpusAux[i])
+                previous.append(previousAux[i])
+                post.append(postAux[i])
 
-    wmd = True
-    if wmd:
+            print("Up to year {0}, current number of sentences in corpus =\
+            {1}".format(year, len(docs)))
+                
+        printSummary(len(docs), docs)
+
+        distances = compileWMDSimilarityList(modelWord2Vec,
+        targetTokenized, docs, p)
+        tops = updateList(tops, distances, docs, corpus, previous, post)
+        if tops.score[0] < bestDist:
+            bestDist = tops.score[0]
+            print("Best Match = {0:5.2f} :: {1}".format(tops.score[0], tops.tokenSent[0]))
 
 
-        start = timer()
+        printQueryResults(tops, nTop, toDisk = 1)
 
-        print("## Setting up Word2Vec model ...")
-        start = timer()
-        modelWord2Vec = createWord2VecModel(docs)
-        #  modelDoc2Vec  = applyDoc2Vec(docs)
         print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
-        fDocs = open(premiumDocsXRow, "r")
-        totSents = sum(1 for _ in fDocs)
-        
+        print("Do you want to produce a mapping? Choose sentence [1-",nTop,"]\
+        (any other number to exit)")
+        k = int(input())
+        if k > 0 and k <= nTop:
+            source = tops.tokenSent[k-1] 
+            transportationProblem(modelWord2Vec, targetTokenized, source)
 
-        while True:
-            targetTokenized = -1
-            while targetTokenized == -1:
-                target, nTop = readTargetSentence(targetFile)
-                targetTokenized = docPreprocessing(target, modelWord2Vec)
-                if targetTokenized == -1:
-                    input("Fix the target file and press any key to continue\
-                    ('target.txt')")
-                else:
-                    print("** ** QUERY : ", target,"\n")
+        answ = input("Type 'q' to quit. Otherwise, restart: ")
 
-            # setup csv readers (corpus and docs)
-            fCorpus = open (premiumCorpusXRow, "r") 
-            readerCorpus = csv.reader(fCorpus)
-            fDocs = open(premiumDocsXRow, "r")
-            readerDocs   = csv.reader(fDocs)
+        p.close()
+        p.join()
 
-            chunkSize = math.ceil(totSents/nChunks)
-            print("Tot Sentences = ", totSents, " and Chunks Size = ", chunkSize)
-            p = Pool(nCores)
-
-
-            tops = Top(nTop)
-
-            print("\n\n")
-            print("*"*80)
-            print("* Query : ", target)
-            print("*"*80)
-            print("\n\n")
-            print("## Reading CHUNKS of preprocessed sentences as lists ...")
-            start    = timer()
-            bestDist = math.inf
-            progr    = 0
-            for counter in range(nChunks):
-                docs    = []
-                corpus  = []
-                init    = progr
-                till    = min(progr + chunkSize, totSents)
-                ending  = till-init
-                progr  += chunkSize
-
-                print("Chunk [{0:3d}/{1:3d}] =\
-                {2:9d}--{3:9d}/{4:9d}".format(counter+1, nChunks, init+1, till, totSents))
-                for row in itertools.islice(readerCorpus, 0, ending):
-                    #  print(readerCorpus.line_num, "Row corpus = ", row)
-                    corpus.append(row)
-
-                for row in itertools.islice(readerDocs, 0, ending):
-                    #  print(readerDocs.line_num, " == ", row)
-                    docs.append(row)
-
-                for doc in docs:
-                    print(doc)
-
-
-                distances = compileWMDSimilarityList(modelWord2Vec,
-                targetTokenized, docs, p)
-                tops = updateList(tops, distances, docs, corpus)
-                if tops.score[0] < bestDist:
-                    bestDist = tops.score[0]
-                    print("Best Match = {0:5.2f} :: {1}".format(tops.score[0], tops.tokenSent[0]))
-                #  if counter > 0:
-                #      break
-            if till != totSents:
-                print("ERROR here : Some sentences have been skipped : ( ", progr,
-                ",", totSents, " )")
-
-            printQueryResults(tops, nTop, toDisk = 1)
-
-            print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
-
-            print("Do you want to produce a mapping? Choose sentence [1-",nTop,"]\
-            (any other number to exit)")
-            k = int(input())
-            if k > 0 and k <= nTop:
-                source = tops.tokenSent[k-1] 
-                transportationProblem(modelWord2Vec, targetTokenized, source)
-
-            asw = input("Type 'q' to quit. Otherwise, restart.")
-
-            p.close()
-            p.join()
-
-            if asw == "q":
-                break
-
-
+        if answ == "q":
+            break
 
 
 if __name__ == '__main__':
     main(sys.argv[1:])
-    #unittest.main()
