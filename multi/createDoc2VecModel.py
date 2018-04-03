@@ -26,7 +26,6 @@
 
 """
 import sys
-import logging
 import csv
 import json
 import itertools
@@ -47,7 +46,7 @@ from nltk import sent_tokenize
 from nltk.corpus import stopwords
 
 stop_words        = stopwords.words("english")
-prefix            = path.expanduser("~/gdrive/research/nlp/data/")
+prefix            = path.expanduser("~/research/nlp/data/")
 ecco_folders      = ["ecco/ecco_portions/normed/96-00/"]
 #  ecco_folders    = ["/home/marco/gdrive/research/nlp/data/temp/"]
 vocab_folder      = "google_vocab/"
@@ -62,11 +61,13 @@ premiumDocs       = "preproc/premiumDocs.csv"
 premiumCorpus     = "preproc/premiumCorpus.csv"
 mappingYears      = "ecco/ecco_portions/year_map.tsv"
 
-period = ["1796", "1797"]
+#  period = ["1796", "1797", "1798", "1799", "1800"]
+period = ["1800"]
+
 targetFile = "target.txt"
 
 
-nCores            = 4
+nCores            = 8
 
 def vocabularyBuilding(prefix):
     '''
@@ -172,8 +173,8 @@ def readEcco(file2year, year):
 
             print("{0:5d}/{1:5d} :: Reading file {2:10s} ".format(countFiles,
             totFiles, f))
-            if countFiles > 1:
-                break
+            #  if countFiles > 1:
+            #      break
 
     print("Discarded {0} sentences out of {1}".format(discarded, tot))
 
@@ -199,9 +200,9 @@ def writeListsPerSentence():
     exit(111)
     
 
-def readPremiumLists(year):
+def readPremiumLists():
 
-    print("Reading premium sentences for year ", year, " from ", premiumDocsXRow)
+    print("Reading premium sentences from ", premiumDocsXRow)
     
     fCorpus = open (premiumCorpusXRow, "r")
     readerCorpus = csv.reader(fCorpus)
@@ -254,8 +255,7 @@ def createDoc2Vec(docs, year):
 
     start = timer()
     # instantiate model (note that min_count=2 eliminates infrequent words)
-    model = doc2vec.Doc2Vec(size = 300, window = 300, min_count = 2, iter =
-    300, workers = nCores, dm=0, max_vocab_size=10000)
+    model = doc2vec.Doc2Vec(size = 300, window = 300, min_count = 2, iter = 300, workers = nCores, dm=0)
 
     # we can also build a vocabulary from the model
     model.build_vocab(docs)
@@ -279,6 +279,20 @@ def createDoc2Vec(docs, year):
     print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
     return model
+
+def pairwise_dists(S, D):
+    
+    nRow = len(S)
+    nCol = len(D)
+    dd = np.zeros((nRow,nCol)
+    for i in range(nRow):
+        for j in range(nCol):
+            dist = [ (a-b)**2 for a,b in zip(S[i],D[j]) ]
+            dist = math.sqrt(sum(dist))
+            dd[i][j] = dist
+
+    return dd
+
 
 
 def readTargetSentence(targetFile):
@@ -305,19 +319,20 @@ def targetPreprocessing(doc):
     return doc
 
 def readMappingYears():
-
     fullname = path.join(prefix,mappingYears)
+    #  fullname = "map.temp"
     print(fullname)
     filename = []
     year     = []
     with open(fullname, "r") as f:
         for line in f:
             ff, yy = line.split()
+            #  print(" ff = ", ff, " and yy = ", yy)
             filename.append(ff)
             year.append(yy)
 
     file2year = {f:y for f,y in zip(filename,year)}
-    print("Mapping filename -> year built ...")
+    print("dictionary built")
     #  print(file2year.keys())
 
     return file2year
@@ -346,9 +361,9 @@ def main(argv):
             docs, corpus, totoFiles = readEcco(file2year, year)
             #
             #  # activate this part to create a Doc2Vec model from the list of sentences
-            docs, corpus = readPremiumLists(year)
-            docs = transform4Doc2Vec(docs)
-            createDoc2Vec(docs, year)
+            #  docs, corpus = readPremiumLists()
+            #  docs = transform4Doc2Vec(docs)
+            #  createDoc2Vec(docs, year)
 
     usedoc2vecmodel =False
     if usedoc2vecmodel: 
@@ -358,7 +373,7 @@ def main(argv):
             print("="*80)
             print("* Year ", year)
             print("="*80)
-            docs, corpus = readPremiumLists(year)  #  NEEDED ???
+            docs, corpus = readPremiumLists()  #  NEEDED ???
             fullpath = path.join(prefix,ecco_models_folder)
             print("Loading ", modelnameD2V, ".", year)
             fullname = fullpath + modelnameD2V +"." + year
@@ -381,11 +396,6 @@ def main(argv):
                 print("\n")
 
 if __name__ == '__main__':
-    #  logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
-    logging.basicConfig(
-        format='%(asctime)s : %(threadName)s : %(levelname)s : %(message)s',
-        level=logging.INFO
-    )
     main(sys.argv[1:])
     #unittest.main()
 

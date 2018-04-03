@@ -85,11 +85,19 @@ import csv
 import itertools
 import fnmatch
 import numpy as np
+
+from scipy.spatial.distance import cdist
+from scipy._lib.six import xrange
+from numpy.linalg import norm
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 from timeit import default_timer as timer
 import math
+from sklearn.utils.extmath import row_norms, safe_sparse_dot
+from sklearn.utils import check_array
+
 
 from gensim.models import doc2vec
 from gensim.models import Word2Vec
@@ -98,6 +106,7 @@ from gensim.similarities import WmdSimilarity
 from gensim.corpora.dictionary import Dictionary
 
 from sklearn.metrics.pairwise import pairwise_distances
+from sklearn.metrics.pairwise import euclidean_distances
 from sklearn import manifold
 import plotly
 import plotly.plotly as py
@@ -126,9 +135,9 @@ premiumCorpusXRowBase  = "preproc/premiumCorpusXRow.csv"
 nCores       =  4
 totFiles     = -1
 nChunks      = 1
-nPerYear     = 100
+nPerYear     = 100000
 
-period = ["1796", "1797"]
+period = ["1796"]
 
 class Top:
     """
@@ -147,11 +156,11 @@ class Top:
 
 # Parse command line
 def parseCommandLine(argv):
-    global distanceType
+    global withCplex
     global inputfile
     global targetFile 
     targetFile = ""
-    distanceType = -1
+    withCplex = -1
     
     try:
         opts, args = getopt.getopt(argv, "ht:i:s:", ["help","type=", "ifile=",
@@ -168,15 +177,15 @@ def parseCommandLine(argv):
         elif opt in ("-i", "--ifile"):
             inputfile = arg
         elif opt in ("-t", "--type"):
-            distanceType = arg
+            withCplex= arg
         elif opt in ("-s", "--sentence"):
             targetFile = arg
 
-    #  if distanceType == -1:
-    #      print("Error : Distance type not defined. Select one using -t : ")
-    #      print("\t 1 : Cosine similarity (document-wise)")
-    #      print("\t 2 : Word Mover's Distance (word-wise)")
-    #      sys.exit(2)
+    if withCplex == -1:
+        print("Error : Distance type not defined. Select one using -t : ")
+        print("\t 1 : Cosine similarity (document-wise)")
+        print("\t 2 : Word Mover's Distance (word-wise)")
+        sys.exit(2)
     if targetFile == "":
         print("Error: Target sentence file not defined. Select one using -s\
         <namefile>")
@@ -377,20 +386,31 @@ def transportationProblem(model, target, source):
     cap = cap/sum(cap)
     dem = np.array([demand[i][1] for i in range(nD)])
     dem = dem/sum(dem)
-    #  print("S and D = ", capacity, " " , demand)
-    #  for i in range(nS):
-    #      print("v2 = ", dctd1[i], " = ", capacity[i][1])
-    #  print("*"*50)
-    #  for j in range(nD):
-    #      print("v2 = ", dctTarget[j], " = ", demand[j][1])
-
-    #  print("Cap vector ", cap)
-    #  print("Dem vector ", dem)
+    print("S and D = ", capacity, " " , demand)
+    for i in range(nS):
+        print("v2 = ", dctd1[i], " = ", capacity[i][1])
+    print("*"*50)
+    for j in range(nD):
+        print("v2 = ", dctTarget[j], " = ", demand[j][1])
+#
+    print("Cap vector ", cap)
+    print("Dem vector ", dem)
 
     # distances
     S         = [model.wv[dctd1[i]] for i in range(nS)]
     D         = [model.wv[dctTarget[i]] for i in range(nD)]
     dd        = pairwise_distances(S, D, metric = "euclidean")
+    # compute lower bound
+    print(dd)
+    lb1 = 0.0
+    for i in range(nS):
+        lb1 += min([dd[i][j] for j in range(nD)])*cap[i]
+    print("lb1 = ", lb1)
+    lb2 = 0.0
+    for j in range(nD):
+        lb2 += min([dd[i][j] for i in range(nS)])*dem[j]
+    print("lb2 = ", lb2)
+
 
     [z, xSol] = solveTransport(dd, cap, dem)
 
@@ -481,6 +501,48 @@ def transportationProblem(model, target, source):
     plotly.offline.plot(fig)
 
 
+def solveTransport2(matrixC, cap, dem, nS, nD):
+    """
+    Solve transportation problem as an LP.
+    This is my implementation of the WMD.
+    """
+    
+    cpx   = cplex.Cplex()
+    x_ilo = []
+    cpx.objective.set_sense(cpx.objective.sense.minimize)
+    for i in range(nS):
+        x_ilo.append([])
+        for j in range(nD):
+            x_ilo[i].append(cpx.variables.get_num())
+            varName = "x." + str(i) + "." + str(j)
+            cpx.variables.add(obj   = [float(matrixC[i][j])],
+                              lb    = [0.0],
+                              names = [varName])
+    # capacity constraint
+    for i in range(nS):
+        index = [x_ilo[i][j] for j in range(nD)]
+        value = [1.0]*nD
+        capacity_constraint = cplex.SparsePair(ind=index, val=value)
+        cpx.linear_constraints.add(lin_expr = [capacity_constraint],
+                                   senses   = ["L"],
+                                   rhs      = [cap[i]])
+
+    # demand constraints
+    #  for j in dctTarget:
+    for j in range(nD):
+        index = [x_ilo[i][j] for i in range(nS)]
+        value = [1.0]*nS
+        demand_constraint = cplex.SparsePair(ind=index, val=value)
+        cpx.linear_constraints.add(lin_expr = [demand_constraint],
+                                   senses   = ["G"],
+                                   rhs      = [dem[j]])
+    cpx.parameters.simplex.display.set(0)
+    cpx.solve()
+
+    z = cpx.solution.get_objective_value()
+
+    return z
+
 def solveTransport(matrixC, cap, dem):
     """
     Solve transportation problem as an LP.
@@ -523,13 +585,14 @@ def solveTransport(matrixC, cap, dem):
 
     z = cpx.solution.get_objective_value()
 
-    print("z* = ", z)
-    x_sol = []
-    for i in range(nS):
-        x_sol.append(cpx.solution.get_values(x_ilo[i]))
-        print([round(x_sol[i][j],2) for j in range(nD)])
+    #  print("z* = ", z)
+    #  x_sol = []
+    #  for i in range(nS):
+    #      x_sol.append(cpx.solution.get_values(x_ilo[i]))
+    #      print([round(x_sol[i][j],2) for j in range(nD)])
 
-    return [z, x_sol]
+    #  return [z, x_sol]
+    return [z, []]
 
 def loadWord2VecModel():
     """
@@ -583,6 +646,29 @@ def compileWMDSimilarityList(modelWord2Vec, target, docs, p):
 
     return results
 
+def updateList2(tops, distance, doc, corp, prev, pos):
+
+    dist = np.append(tops.score, distance)
+    idx = dist.argsort()
+
+    topAux = Top(nTop)
+    for i in range(nTop):
+        topAux.score[i] = dist[idx[i]]
+        if idx[i] == nTop: #  this is the new sentence
+            topAux.previous[i]  = prev
+            topAux.next[i]      = pos
+            topAux.tokenSent[i] = doc
+            topAux.sent[i]      = corp
+        else:
+            topAux.tokenSent[i] = tops.tokenSent[idx[i]]
+            topAux.sent[i]      = tops.sent[idx[i]]
+            topAux.previous[i]  = tops.previous[idx[i]]
+            topAux.next[i]      = tops.next[idx[i]]
+
+    return topAux
+
+
+
 def updateList(tops, distances, docs, corpus, previous, post):
     """
     Update list of top N best results.
@@ -632,19 +718,33 @@ def printQueryResults(tops, nTop, toDisk = 1):
         print("="*80)
         print("Keywords({0}) = {1:5.3f} :: {2}".format(i+1, tops.score[i],
         tops.tokenSent[i]))
+        ss = ", ".join( repr(e) for e in tops.sent[i])
+        print("** ", ss)
+        print("="*80)
+
+    print("\n\n LIST OF SENTENCES IN CONTEXT\n")
+        
+    for i in range(nTop):
         print("="*80)
         ss = ", ".join( repr(e) for e in tops.previous[i] )
         print(ss)
         print("-"*80)
         ss = ", ".join( repr(e) for e in tops.sent[i])
-        #  print("dist({0:2d}) = {1:5.2f} :: {2}".format(i+1, tops.score[i], ss))
-        print("** ", ss)
+        print("({0:3d}) :: {1} ".format(i+1, ss))
         print("-"*80)
         ss = ", ".join( repr(e) for e in tops.next[i] )
         print(ss)
-        
         print("="*80)
         print("\n\n")
+
+    dd = {key:0 for i in range(nTop) for key in tops.tokenSent[i] }
+    print(dd)
+    for i in range(nTop):
+        for w in tops.tokenSent[i]:
+            dd[w] += 1
+
+    for key in sorted(dd, key=dd.get, reverse=True):
+        print("{0:20s} = {1:4d}".format(key, dd[key]))
 
     sys.stdout = sys.__stdout__
 
@@ -681,7 +781,7 @@ def readPremiumLists():
 
     return docs, corpus, totSents
 
-def shortlistDoc2Vec(year, targetTokenized, docs, corpus, totSents):
+def shortlistDoc2Vec(model, year, targetTokenized, docs, corpus, totSents):
     """
     Based on the doc2vec.model.year model, the top N sentences for the current
     year are retrieved and stored in a temporary data structure. These
@@ -702,8 +802,14 @@ def shortlistDoc2Vec(year, targetTokenized, docs, corpus, totSents):
     inferred_vector = modelDoc2Vec.infer_vector(targetTokenized)
     nSelected = min(nPerYear, totSents)
     sims = modelDoc2Vec.docvecs.most_similar([inferred_vector], topn=nSelected)
+
+    #  sims = zip(list(range(len(docs))), list(range(len(docs))))
     for i,j in sims:
-        docsNew.append(docs[i])
+        #********************************************************************
+        # NOTE: Remove this when models are properly built !!!!!! <----------
+        docTemp = [w for w in docs[i] if w in model.wv.vocab]
+        docsNew.append(docTemp)
+        #  docsNew.append(docs[i])
         corpusNew.append(corpus[i])
         if i > 0:
             previous.append(corpus[i-1])
@@ -716,6 +822,118 @@ def shortlistDoc2Vec(year, targetTokenized, docs, corpus, totSents):
 
     return docsNew, corpusNew, previous, post
 
+def mycdist(XA, XB):
+    XA = np.asarray(XA, order="c")
+    XB = np.asarray(XB, order="c")
+    sA = XA.shape
+    sB = XB.shape
+    mA = sA[0]
+    mB = sB[0]
+    n  = sA[1]
+    dm = np.zeros((mA,mB), dtype=np.double)
+    XA = np.ascontiguousarray(XA, dtype=np.double)
+    XB = np.ascontiguousarray(XB, dtype=np.double)
+    for i in xrange(0,mA):
+        for j in xrange(0,mB):
+            dm[i,j]=norm(XA[i,:]-XB[j,:])
+
+    return dm
+    
+
+def pairwise_dists(X, Y, YY):
+    """
+    Fast implementation of pairwise distances. We use the shortcut:
+    dist(X,Y ) = sqrt( dot(X,X) - 2*dot(X,Y) + dot(Y,Y)
+    which has the problem that does not return perfectly symmetric results (but
+    this is not a problem in this context.)
+    """
+    X = check_array(X)
+    XX = row_norms(X, squared=False)[:, np.newaxis]
+
+    distances = safe_sparse_dot(X, Y.T, dense_output = True)
+    distances *= -2
+    distances += XX
+    distances += YY
+    np.maximum(distances, 0, out=distances)
+
+    return np.sqrt(distances, out=distances)
+
+def wmdTransport(model, target, docs, p, corpus, previous, post):
+
+    
+    topsAux   = Top(nTop)
+    nDocs     = len(docs)
+    results   = [-1.0]*nDocs
+    bestUB    = math.inf
+    totPruned = 0
+    bestTime  = 0.0
+    star      = ""
+    start     = timer()
+
+    # setup target (invariant over cycle)
+    nWords = len(target)
+    demand = {key:0 for key in target}
+    for w in target:
+        demand[w] += 1
+    nD     = len(demand)
+    dem    = [val/nWords for val in demand.values()]
+    D      = model.wv[demand.keys()]
+
+    for index in range(nDocs):
+        
+        if index  % 10000 == 0:
+            print("[{0:9d}/{1:9d}] score = {2:5.3f}\t time = {3:5.2f}\t [Fathomed {4:9d} ({5:4.2f})] {6}".format(index, nDocs, bestUB, timer()-start, totPruned, totPruned/nDocs, star)) 
+            star = ""
+
+        source   = docs[index]
+        nWords   = len(source)
+        capacity = {key:0 for key in source}
+        #  print("SOURCE = ", source)
+        for w in source:
+            capacity[w] += 1
+
+        nS       = len(capacity)
+        cap      = [val/nWords for val in capacity.values()]
+        S        = model.wv[capacity.keys()]
+        dd       = cdist(S,D)
+        #  dd2=mycdist(S2,D)
+
+        lb = 0.0
+        for i in range(nS):
+            lb += min([dd[i][j] for j in range(nD)])*cap[i]
+        if lb >= topsAux.score[nTop-1]:
+            totPruned += 1
+            continue
+        lb = 0.0
+        for j in range(nD):
+            lb += min([dd[i][j] for i in range(nS)])*dem[j]
+        if lb > topsAux.score[nTop-1]:
+            totPruned += 1
+            continue
+
+        # if not pruned, solve transportation problem
+        results[index] = solveTransport2(dd, cap, dem, nS, nD)
+        if results[index] < topsAux.score[nTop-1]:
+            doc  = source
+            corp = corpus[index]
+            prev = previous[index]
+            pos  = post[index]
+            topsAux = updateList2(topsAux, results[index], doc, corp, prev, pos)
+
+        #  zWMD = model.wmdistance(source, target)
+            if results[index] < bestUB:
+                star     = " *"
+                bestUB   = results[index]
+                bestTime = timer()-start
+                # write current best query to disk
+                printQueryResults(topsAux, nTop, toDisk = 1)
+
+    print("Pruned = {0}/{1}".format(totPruned, nDocs))
+
+    return topsAux
+
+    
+
 def main(argv):
     '''
     The Word Mover Distance (WMD) implementation for the ECCO dataset.
@@ -726,11 +944,6 @@ def main(argv):
     global premiumDocsXRow
     global premiumCorpusXRow
 
-    docs       = [] #  the documents in format required by doc2vec
-    corpus     = [] #  the documents after preprocessing (not fit for doc2vec)
-    distMatrix = [] #  the distance matrix used by hierarchical clustering
-    previous   = [] #  previous sentence in the shortlist
-    post       = [] #  next sentence in the shortlist
 
     parseCommandLine(argv)
 
@@ -741,7 +954,14 @@ def main(argv):
     print("... Done in {0:5.2f} seconds.\n".format(timer() - start))
 
     while True:
+
+        docs       = [] #  the documents in format required by doc2vec
+        corpus     = [] #  the documents after preprocessing (not fit for doc2vec)
+        distMatrix = [] #  the distance matrix used by hierarchical clustering
+        previous   = [] #  previous sentence in the shortlist
+        post       = [] #  next sentence in the shortlist
         targetTokenized = -1
+
         while targetTokenized == -1:
             target, nTop = readTargetSentence(targetFile)
             targetTokenized = docPreprocessing(target, modelWord2Vec)
@@ -756,7 +976,6 @@ def main(argv):
                 print("\n\n")
 
         tops     = Top(nTop)
-        start    = timer()
         bestDist = math.inf
 
         p = Pool(nCores) #  used for parallel processing of WMD
@@ -770,7 +989,8 @@ def main(argv):
             print("="*80)
 
             docsD2V, corpusD2V, totSents = readPremiumLists()  
-            docsAux, corpusAux, previousAux, postAux = shortlistDoc2Vec(year,
+            docsAux, corpusAux, previousAux, postAux =\
+            shortlistDoc2Vec(modelWord2Vec, year,
             targetTokenized, docsD2V, corpusD2V, totSents)
             for i in range(len(docsAux)):
                 docs.append(docsAux[i])
@@ -780,15 +1000,21 @@ def main(argv):
 
             print("Up to year {0}, current number of sentences in corpus =\
             {1}".format(year, len(docs)))
-                
+
         printSummary(len(docs), docs)
 
-        distances = compileWMDSimilarityList(modelWord2Vec,
-        targetTokenized, docs, p)
-        tops = updateList(tops, distances, docs, corpus, previous, post)
-        if tops.score[0] < bestDist:
-            bestDist = tops.score[0]
-            print("Best Match = {0:5.2f} :: {1}".format(tops.score[0], tops.tokenSent[0]))
+        start    = timer()
+
+        if withCplex == "1":
+            tops = wmdTransport(modelWord2Vec, targetTokenized, docs, p, corpus,
+            previous, post)
+        else:
+            distances = compileWMDSimilarityList(modelWord2Vec,
+            targetTokenized, docs, p)
+            tops = updateList(tops, distances, docs, corpus, previous, post)
+            if tops.score[0] < bestDist:
+                bestDist = tops.score[0]
+                print("Best Match = {0:5.2f} :: {1}".format(tops.score[0], tops.tokenSent[0]))
 
 
         printQueryResults(tops, nTop, toDisk = 1)
@@ -797,12 +1023,14 @@ def main(argv):
 
         print("Do you want to produce a mapping? Choose sentence [1-",nTop,"]\
         (any other number to exit)")
-        k = int(input())
+        k = 0
+        #  k = int(input())
         if k > 0 and k <= nTop:
             source = tops.tokenSent[k-1] 
             transportationProblem(modelWord2Vec, targetTokenized, source)
 
-        answ = input("Type 'q' to quit. Otherwise, restart: ")
+        #  answ = input("Type 'q' to quit. Otherwise, restart: ")
+        answ = "q"
 
         p.close()
         p.join()
