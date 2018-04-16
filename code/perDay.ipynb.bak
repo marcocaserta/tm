@@ -1,0 +1,926 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import csv\n",
+    "import shutil\n",
+    "import glob\n",
+    "from nltk.corpus import stopwords\n",
+    "from nltk import word_tokenize\n",
+    "from os import path, listdir\n",
+    "import collections\n",
+    "from collections import namedtuple\n",
+    "import numpy as np\n",
+    "import matplotlib.pyplot as plt\n",
+    "import pandas as pd\n",
+    "\n",
+    "folder = \"NEWS_TXT_v4/\"\n",
+    "perDayFolders = \"v4/\"\n",
+    "prefix = path.expanduser(\"~/gdrive/research/nlp/data/\")\n",
+    "vocab_folder = \"google_vocab/\"\n",
+    "stop_words = stopwords.words(\"english\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Four Tasks\n",
+    "\n",
+    "-  Task 1: Files Preprocessing. Each press release should be preprocessed and stored on disk. These preprocessed files are the ones used to create the doc2vec model\n",
+    "-  Task 2: doc2vec Model Generation. Progressively create doc2vec models, from year 0 to year \"t\", where t=1994,...,2015. These doc2vec models are stored within each year directory.\n",
+    "-  Task 3: Distance Matrix Computation. Given a time period (a day, a month, etc.) load all the files belonging to that period (the corpus) and compute the distance matrix. This matric could be stored on disk.\n",
+    "-  Task 4: Clustering. Use the distance matrix to carry out specific studies of press releases over time.\n",
+    "\n",
+    "In addition, there is also a Task 0, which is the restructuring and organization of the different folders. This is the first task carried out below."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "## Task 0: Restructuring Directories and Moving Files\n",
+    "\n",
+    "Move each file in the corresponding year folder and, within the year, the corresponding day and month. For example, a file issued on January 21st, 2015 will be stored in the folder:\n",
+    "\n",
+    "-  2015/01_21/fullname.txt\n",
+    "\n",
+    "We also create a global mapping for all the files in the dataset. The mapping gives a unique identifier for each file in the dataset and it is saved in the file `mapping.txt`.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "fmap = open(\"mapping.txt\", \"w\")\n",
+    "\n",
+    "fullpath = path.join(prefix,folder)\n",
+    "for f in listdir(fullpath):\n",
+    "    print(\"name is = \", f)\n",
+    "    \n",
+    "    fName = f[:-4]\n",
+    "    print(\"Now fName is = \", fName)\n",
+    "    fAux = fName.split(\"_\")\n",
+    "    print(fAux)\n",
+    "    year = fAux[1]\n",
+    "    dirLevel1 = path.join(prefix,perDayFolders) + year\n",
+    "    if not os.path.exists(dirLevel1):\n",
+    "        os.makedirs(dirLevel1)\n",
+    "    dirLevel2 = dirLevel1 + \"/\" + fAux[2] + \"_\" + fAux[3]\n",
+    "    fmap.write(\"{0}\\t {1}\\t {2}\\t {3}\\t {4}\\n\".format(f,fAux[0],fAux[1],fAux[2],fAux[3]))\n",
+    "    if not os.path.exists(dirLevel2):\n",
+    "        os.makedirs(dirLevel2)\n",
+    "    origin = fullpath + f\n",
+    "    dest   = dirLevel2 + \"/\" + f\n",
+    "    shutil.copy2(origin, dest)\n",
+    "    print(\"copying from \", origin, \" to \", dest)\n",
+    "    \n",
+    "fmap.close()\n",
+    "  "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "## Task 1: Files Preprocessing\n",
+    "\n",
+    "We now get into each directory of the current year, and add each file within that directory to the corpus. In addition, we write a _preprocessed_ version of the file (suffix `.pre`)."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "Let us first import the mapping filename $\\rightarrow$ tag. Here we are reading the whole list, i.e., the entire dataset. We define two structures to query the filename and the absolute id value:\n",
+    "-  `file2tag`: Given a file name, it returns the corresponding unique identifier\n",
+    "-  `tag2file`: Given a unique identifier, i.e., a tag, it returns the full file name (cik_year_month_day.txt)\n",
+    "\n",
+    "We also create a dataframe, `dfMap`, which contains all the information associated to a specific file, i.e., full name, cik, year, month, day, tag.\n",
+    "\n",
+    "For the preprocessing phase, we use the following criteria:\n",
+    "- exclude all words with length $\\leq$ 2\n",
+    "- exclude all words that are not alphabetic (`isalpha()` from nltk)\n",
+    "- exclude stopwords\n",
+    "- exclude all words which are not in the google news dictionary (cut to the 500k most frequent words)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 282,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "fullpath = path.join(prefix,vocab_folder)\n",
+    "name_vocab = fullpath + \"embed500.vocab\"\n",
+    "with open(name_vocab) as f:\n",
+    "    vocab_list = map(str.strip,f.readlines())\n",
+    "vocab_dict = {w:k for k,w in enumerate(vocab_list)}"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "filenames = []\n",
+    "tags = []\n",
+    "nRows = sum(1 for line in open('mapping.txt'))\n",
+    "dfMap = pd.DataFrame(index=np.arange(0, nRows), columns=('name', 'cik', 'year', 'month','day','tag') )\n",
+    "\n",
+    "with open(\"mapping.txt\", \"r\") as f:\n",
+    "    row = 0\n",
+    "    for line in f:\n",
+    "        line=line.rstrip() # remove \\n from each row\n",
+    "        dfMap.loc[row] = line.split(\",\")\n",
+    "        row += 1\n",
+    "dfMap[\"year\"] = dfMap[\"year\"].astype(\"int\")   \n",
+    "dfMap[\"month\"] = dfMap[\"month\"].astype(\"int\")   \n",
+    "dfMap[\"day\"] = dfMap[\"day\"].astype(\"int\")   \n",
+    "dfMap[\"tag\"] = dfMap[\"tag\"].astype(\"int\")   \n",
+    "#print(dfMap.dtypes)\n",
+    "file2tag = {f:t for f,t in zip(dfMap[\"name\"],dfMap[\"tag\"])}\n",
+    "tag2file = {t:f for t,f in zip(dfMap[\"tag\"],dfMap[\"name\"])}\n",
+    "\n",
+    "#print(file2tag[\"11544_1996_12_13.txt\"])\n",
+    "#print(tag2file[\"10\"])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "year0 = \"2014\"\n",
+    "yearT = \"2015\"\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "yearSet = list(range(int(year0), int(yearT)+1))\n",
+    "\n",
+    "for year in yearSet:\n",
+    "    \n",
+    "    dirFull = path.join(prefix,perDayFolders) + str(year)\n",
+    "    print(dirFull)\n",
+    "\n",
+    "    for ff in listdir(dirFull):\n",
+    "        print(\"Entering folder \", ff)\n",
+    "        filteredList = path.join(dirFull,ff) + \"/*.txt\"\n",
+    "        for f in glob.glob(filteredList):\n",
+    "\n",
+    "            fullname = path.join(dirFull,ff,f)\n",
+    "            if os.path.isfile(fullname+\".pre\"):\n",
+    "                continue\n",
+    "\n",
+    "            fTxt = open(fullname)\n",
+    "            doc = fTxt.read()\n",
+    "            words = [w.lower() for w in word_tokenize(doc) if w not in stop_words]\n",
+    "            words = [w for w in words if len(w) > 2 and w.isalpha() and w in vocab_dict]\n",
+    "\n",
+    "            preprocName = fullname+\".pre\"\n",
+    "            fPre = open(preprocName, \"w\")\n",
+    "            writerDoc = csv.writer(fPre)\n",
+    "            writerDoc.writerows([words])\n",
+    "            fPre.close()\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 295,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "True"
+      ]
+     },
+     "execution_count": 295,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "\"bae\" in vocab_dict"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "## Task 2: doc2vec model creation\n",
+    "\n",
+    "We now need to read all the files belonging to a given year (later, up to that year) and build a doc2vec model to be used with the documents of that year. The doc2vect model is stored within the folder of that year and a suffix `.year` is added to each model."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "from gensim.models import doc2vec\n",
+    "import logging\n",
+    "logging.basicConfig(\n",
+    "        format='%(asctime)s : %(threadName)s : %(levelname)s : %(message)s',\n",
+    "        level=logging.INFO\n",
+    ")\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "[NOT NEEDED ANYMORE] First, let us define a function used to determine whether a certain document matches the criteria used to define which documents will be employed to build the distance matrix (typically, year-month-day or any subset of that)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 287,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "def isSelected(name, year, month, day):\n",
+    "    name= name[:-4]\n",
+    "    cik, yy, mm, dd = name.split(\"_\")\n",
+    "    if yy == year:\n",
+    "        return True\n",
+    "    else:\n",
+    "        return False"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "Now, we import all the preprocessed files relative to the period considered in the construction of the doc2vec model.\n",
+    "\n",
+    "**Rem.:** To build the doc2vec model, we use all the files in the period year0 to yearT. However, the distance matrix computation only includes the document in a prespecified period, e.g., a year, or a day. For this reason, we define here a new dictionary, called `corpus2tag`, which is used to identify which documents of the current corpus belong to a given time window. There are the only documents for which we want to compute the distance matrix.\n",
+    "\n",
+    "Two tags:\n",
+    "-  the fist is the id number within the corpus\n",
+    "-  the second is the absolute id number, i.e., within the entire dataset\n",
+    "\n",
+    "Each document embedding can be accessed via any of the two tags.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "yearT = \"2015\"\n",
+    "year0 = \"2014\"\n",
+    "yearSet = list(range(int(year0), int(yearT)+1))\n",
+    "\n",
+    "docs = []\n",
+    "tagsAbs = []\n",
+    "corpusID = []\n",
+    "absID = []\n",
+    "analyzedDocument = namedtuple('AnalyzedDocument','words tags')\n",
+    "i = 0\n",
+    "for year in yearSet:\n",
+    "    print(\"Considering year \", year)\n",
+    "    dirFull = path.join(prefix,perDayFolders) + str(year)\n",
+    " \n",
+    "    for ff in listdir(dirFull):\n",
+    "        filteredList = path.join(dirFull,ff) + \"/*.txt.pre\"\n",
+    "        for f in glob.glob(filteredList):\n",
+    "            name = f.split(\"/\")[-1]\n",
+    "            name = name[:-4]\n",
+    "            #selected = 0\n",
+    "            #print(name, file2tag[name])\n",
+    "            #if isSelected(name, yearT, [], []):\n",
+    "            #    corpusID.append(i)\n",
+    "            #    absID.append(file2tag[name])\n",
+    "            #    selected = 1\n",
+    "                \n",
+    "            fullname = path.join(dirFull, ff, f)\n",
+    "            fToken = open(fullname, \"r\")\n",
+    "            readerDoc = csv.reader(fToken)\n",
+    "            doc = next(readerDoc)\n",
+    "            fToken.close()\n",
+    "            tags = [i,file2tag[name]]\n",
+    "            docs.append(analyzedDocument(doc,tags))\n",
+    "\n",
+    "            i = i + 1\n",
+    "    print(\"Corpus with {0:5d} documents.\".format(len(docs)))\n",
+    "\n",
+    "    \n",
+    "#corpus2tag = {id:t for id,t in zip(corpusID,absID)}\n",
+    "#print(\"List of documents included in the considered time window::\")\n",
+    "#print(corpus2tag)\n",
+    "#verify\n",
+    "#print(docs[64])\n",
+    "#print(tag2file[corpus2tag[64]])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "# creating doc2vec model for the current year\n",
+    "model = doc2vec.Doc2Vec(size=300, window=100, min_count=2, iter=200, workers=4, dm=1, negative=10)\n",
+    "model.build_vocab(docs)\n",
+    "model.train(docs, total_examples=model.corpus_count, epochs=model.iter)\n",
+    "model.init_sims(replace=True)\n",
+    "\n",
+    "# save model on disk\n",
+    "nameModel = \"doc2vec.model.\" + str(year)\n",
+    "fullname = path.join(dirFull,nameModel)\n",
+    "print(\"Saving model \", fullname)\n",
+    "model.save(fullname)\n",
+    "model.delete_temporary_training_data(keep_doctags_vectors=True, keep_inference=True)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "## Task 3: Using doc2vec model\n",
+    "\n",
+    "Here, we upload a doc2vec model for a specific year and use it to build a distance matrix. In addition, to separate model creation from model use, we need to find out which documents belong to the corpus.\n",
+    "\n",
+    "**Rem.:** There are two ways of using a doc2vec model: i. Getting the embedding of a document stored within the doc2vec model. Obviously, this requires that the document was actually used in the doc2vec creation phase. We also need to know the tag associated to that document. We can then refer to the embedding using the tag; (ii) Inferring an embedding vector and treating the document as a new, unseen one. In this case, whether the document was used or not durign the doc2vec model creation phase does not matter, since the model will provide an embedding for a document, treating it as unseen. \n",
+    "\n",
+    "While approach i. is deterministic (it always returns the same embedding for a document), approach ii. is stochastic (the embedding vector is different every time we ask to compute the inferred vector."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "2018-04-05 06:50:22,463 : MainThread : INFO : loading Doc2Vec object from /home/marco/gdrive/research/nlp/data/v4/2015/doc2vec.model.2015\n",
+      "2018-04-05 06:50:22,651 : MainThread : INFO : loading wv recursively from /home/marco/gdrive/research/nlp/data/v4/2015/doc2vec.model.2015.wv.* with mmap=None\n",
+      "2018-04-05 06:50:22,652 : MainThread : INFO : setting ignored attribute syn0norm to None\n",
+      "2018-04-05 06:50:22,653 : MainThread : INFO : loading docvecs recursively from /home/marco/gdrive/research/nlp/data/v4/2015/doc2vec.model.2015.docvecs.* with mmap=None\n",
+      "2018-04-05 06:50:22,655 : MainThread : INFO : setting ignored attribute cum_table to None\n",
+      "2018-04-05 06:50:22,656 : MainThread : INFO : loaded /home/marco/gdrive/research/nlp/data/v4/2015/doc2vec.model.2015\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Loading model  /home/marco/gdrive/research/nlp/data/v4/2015/doc2vec.model.2015\n"
+     ]
+    }
+   ],
+   "source": [
+    "# define the year and read corresponding doc2vec model\n",
+    "year = \"2015\"\n",
+    "dirFull = path.join(prefix,perDayFolders) + year\n",
+    "fullname = dirFull + \"/doc2vec.model.\" + year\n",
+    "print(\"Loading model \", fullname)\n",
+    "modelDoc2Vec = doc2vec.Doc2Vec.load(fullname)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "2018-04-05 06:50:30,167 : MainThread : INFO : precomputing L2-norms of word weight vectors\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "[('morning', 0.783292293548584),\n",
+       " ('session', 0.6503171920776367),\n",
+       " ('comes', 0.5055868625640869),\n",
+       " ('distributing', 0.499650239944458),\n",
+       " ('instructions', 0.485883891582489),\n",
+       " ('happen', 0.478523313999176),\n",
+       " ('operator', 0.4593983590602875),\n",
+       " ('question', 0.4569997191429138),\n",
+       " ('essential', 0.44552117586135864),\n",
+       " ('that', 0.4142085611820221)]"
+      ]
+     },
+     "execution_count": 8,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# just a little test\n",
+    "modelDoc2Vec.most_similar(\"good\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "modelDoc2Vec.wv.vocab # to get the vocabulary"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "## Task 3: Distance Matrix Computation\n",
+    "\n",
+    "We can use two approaches to similarity computation:\n",
+    "- Using the actual doc2vec embedding vector\n",
+    "- Using an inferred vector\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Using the actual doc2vec embedding vector\n",
+    "\n",
+    "Each document in the corpus is now associated to a vector, contained in the doc2vec model. We can simply get the vector by using `modelDoc2Vec[doc]` to get the embedding of the document. However, the problem here is that, if in the model creation phase we eliminated, e.g., all the words that appear only once (`min_count=2`), then it might happen that we cannot get back the actual vector associated to `doc` (an error message notifies that a given word is not in the vocabulary.) We thus need to screen the document and eliminate all the words that are not in the vocabulary. \n",
+    "\n",
+    "Alternatively, and much simpler, we can get the tag of each document in the current corpus, and directly obtain the embedding of that document using `modelDoc2Vec.docvecs[tag]`. Since here we are accessing a pre-computed embedding, without using the actual document, we do not have the problem described above. Note that, in this case, we do not even need to load the document in memory, since with the tag it will suffice.\n",
+    "\n",
+    "Let us first get a list of documents tag to be used to compute the distance matrix. Which documents should be included here depends on the strategy used. For now, assume we want to use all the documents of a given year. \n",
+    "\n",
+    "__Note:__ In this case, we do not even need to load the corpus. We just need to create a list of tags corresponding to the documents we want to use in the distance matrix computation."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[972, 973, 974, 975, 976, 977, 978, 979, 980, 981, 982, 983, 984, 985, 986, 987, 988, 989, 990, 991, 992, 993, 994, 995, 996, 997, 998, 999]\n"
+     ]
+    }
+   ],
+   "source": [
+    "# get absolute tag for all documents belonging to a given year\n",
+    "year = \"2015\"\n",
+    "tagList = []\n",
+    "nRows = len(dfMap)\n",
+    "for row in range(nRows):\n",
+    "    #print(dfMap.iloc[row])\n",
+    "    if dfMap.iloc[row][\"year\"] == int(year):\n",
+    "        #print(\"file \", dfMap.iloc[row][\"name\"], \" selected\")\n",
+    "        tagList.append(dfMap.iloc[row][\"tag\"])\n",
+    "print(tagList)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "print(sorted(corpus2tag.values()))\n",
+    "print(sorted(corpus2tag.keys()))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now, compute the pairwise distances among all the documents in the `tagList`."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 375,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "2018-04-04 17:02:43,754 : MainThread : INFO : precomputing L2-norms of doc weight vectors\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Vector  64 (  974) : Rank =   0 (score = 1.000)\n",
+      "Vector  65 (  975) : Rank =   0 (score = 1.000)\n",
+      "Vector  66 (  994) : Rank =   0 (score = 1.000)\n",
+      "Vector  67 (  978) : Rank =   0 (score = 1.000)\n",
+      "Vector  40 (  982) : Rank =   0 (score = 1.000)\n",
+      "Vector  41 (  981) : Rank =   0 (score = 1.000)\n",
+      "Vector  42 (  986) : Rank =   0 (score = 1.000)\n",
+      "Vector  43 (  985) : Rank =   0 (score = 1.000)\n",
+      "Vector  44 (  996) : Rank =   0 (score = 1.000)\n",
+      "Vector  45 (  972) : Rank =   0 (score = 1.000)\n",
+      "Vector  46 (  992) : Rank =   0 (score = 1.000)\n",
+      "Vector  47 (  987) : Rank =   0 (score = 1.000)\n",
+      "Vector  48 (  976) : Rank =   0 (score = 1.000)\n",
+      "Vector  49 (  998) : Rank =   0 (score = 1.000)\n",
+      "Vector  50 (  999) : Rank =   0 (score = 1.000)\n",
+      "Vector  51 (  980) : Rank =   0 (score = 1.000)\n",
+      "Vector  52 (  997) : Rank =   0 (score = 1.000)\n",
+      "Vector  53 (  991) : Rank =   0 (score = 1.000)\n",
+      "Vector  54 (  990) : Rank =   0 (score = 1.000)\n",
+      "Vector  55 (  984) : Rank =   0 (score = 1.000)\n",
+      "Vector  56 (  983) : Rank =   0 (score = 1.000)\n",
+      "Vector  57 (  995) : Rank =   0 (score = 1.000)\n",
+      "Vector  58 (  977) : Rank =   0 (score = 1.000)\n",
+      "Vector  59 (  989) : Rank =   0 (score = 1.000)\n",
+      "Vector  60 (  973) : Rank =   0 (score = 1.000)\n",
+      "Vector  61 (  988) : Rank =   0 (score = 1.000)\n",
+      "Vector  62 (  993) : Rank =   0 (score = 1.000)\n",
+      "Vector  63 (  979) : Rank =   0 (score = 1.000)\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "Counter({0: 28})"
+      ]
+     },
+     "execution_count": 375,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "f = open(\"dist\")\n",
+    "nDocs = len(tagList)\n",
+    "vals = [ [0.0 for i in range(nDocs)] for j in range(nDocs)]\n",
+    "    \n",
+    "for i in range(nDocs):\n",
+    "    idx = tagList[i] \n",
+    "    tag_i = docs[idx].tags[1]\n",
+    "        \n",
+    "    for j in range(i,nDocs):\n",
+    "        idy = tagList[j]\n",
+    "        tag_j = docs[idy].tags[1] #tags[1] is the absolute tag\n",
+    "        val = modelDoc2Vec.docvecs.similarity(tag_i,tag_j)\n",
+    "        \n",
+    "        #vals[i][j] = round(1.0-val,4)\n",
+    "        #vals[j][i] = round(1.0-val,4)\n",
+    "\n",
+    "ranks = []\n",
+    "#for id in range(len(docs)):\n",
+    "for id in tagList:\n",
+    "    #doc = [w for w in docs[id].words if w in modelDoc2Vec.wv.vocab]\n",
+    "    v0 = modelDoc2Vec.docvecs[id]\n",
+    "    #v0 = modelDoc2Vec[doc]\n",
+    "    sims = modelDoc2Vec.docvecs.most_similar([v0], topn=len(modelDoc2Vec.docvecs))\n",
+    "    rank = [i for i,j in sims].index(id) #[id for id,sim in sims].index(id)\n",
+    "    print(\"Vector {0:3d} ({1:5d}) : Rank = {2:3d} (score = {3:5.3f})\".format(id,corpus2tag[id],rank,sims[rank][1]))\n",
+    "    ranks.append(rank)\n",
+    "    \n",
+    "collections.Counter(ranks) \n",
+    "    "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "deletable": true,
+    "editable": true
+   },
+   "source": [
+    "### Using an inferred vector\n",
+    "\n",
+    "With _gensim_, it is possible to infer a vector associated to an (unseen) document. In this case, whether or not all the words of a document are in the vocabulary no longer matters. One could then create an inferred vector for each document in the corpus and find the closest document in the corpus w.r.t. the inferred vector. If the doc2vec model works, the closest document should always be itself. To test the quality of the doc2vec model used, we can then count how many time the closest document to each inferred vector is actually the original document itself.\n",
+    "\n",
+    "Let us run a test to determine whether the doc2vec model is accurate. We compute the inferred vector for each document in the corpus. Next, we find the most similar document to each inferred vector. If the doc2vec model works, each document should return **itself** as most similar. Finally, we count how many times this happens (ideally, all the times).\n",
+    "\n",
+    "At this stage, the accuracy of the answer seems to depend on the number of iterations used to generate the inferred vector."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 315,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Vector  64 : Rank =   0 with score 0.834\n",
+      "Vector  65 : Rank =   0 with score 0.877\n",
+      "Vector  66 : Rank =   0 with score 0.857\n",
+      "Vector  67 : Rank =   0 with score 0.850\n",
+      "Vector  40 : Rank =   0 with score 0.781\n",
+      "Vector  41 : Rank =   0 with score 0.828\n",
+      "Vector  42 : Rank =   0 with score 0.849\n",
+      "Vector  43 : Rank =   0 with score 0.853\n",
+      "Vector  44 : Rank =   0 with score 0.796\n",
+      "Vector  45 : Rank =   6 with score 0.762\n",
+      "Vector  46 : Rank =   0 with score 0.760\n",
+      "Vector  47 : Rank =   0 with score 0.840\n",
+      "Vector  48 : Rank =   0 with score 0.884\n",
+      "Vector  49 : Rank =   0 with score 0.764\n",
+      "Vector  50 : Rank =   0 with score 0.776\n",
+      "Vector  51 : Rank =   0 with score 0.822\n",
+      "Vector  52 : Rank =   0 with score 0.850\n",
+      "Vector  53 : Rank =   0 with score 0.824\n",
+      "Vector  54 : Rank =   6 with score 0.765\n",
+      "Vector  55 : Rank =   5 with score 0.789\n",
+      "Vector  56 : Rank =   0 with score 0.812\n",
+      "Vector  57 : Rank =   0 with score 0.807\n",
+      "Vector  58 : Rank =   0 with score 0.758\n",
+      "Vector  59 : Rank =   0 with score 0.760\n",
+      "Vector  60 : Rank =   0 with score 0.863\n",
+      "Vector  61 : Rank =   0 with score 0.760\n",
+      "Vector  62 : Rank =   1 with score 0.783\n",
+      "Vector  63 : Rank =   0 with score 0.765\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "Counter({0: 24, 1: 1, 5: 1, 6: 2})"
+      ]
+     },
+     "execution_count": 315,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "ranks = []\n",
+    "for id in corpus2tag.keys():\n",
+    "\n",
+    "    inferred_vector = modelDoc2Vec.infer_vector(docs[id].words, steps=200)\n",
+    "    #print(inferred_vector)\n",
+    "    sims = modelDoc2Vec.docvecs.most_similar([inferred_vector], topn=len(modelDoc2Vec.docvecs))\n",
+    "    rank = [i for i,j in sims].index(id)\n",
+    "    print(\"Vector {0:3d} : Rank = {1:3d} with score {2:5.3f}\".format(id,rank,sims[rank][1]))\n",
+    "    ranks.append(rank)\n",
+    "    \n",
+    "collections.Counter(ranks) "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 401,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "nDocs = len(corpus2tag)\n",
+    "listdocs = [*corpus2tag]\n",
+    "\n",
+    "vals = [ [0.0 for i in range(nDocs)] for j in range(nDocs)]\n",
+    "\n",
+    "    \n",
+    "for i in range(nDocs):\n",
+    "    idx = listdocs[i] \n",
+    "    tag_i = docs[idx].tags[0]\n",
+    "        \n",
+    "    for j in range(i,nDocs):\n",
+    "        idy = listdocs[j]\n",
+    "        tag_j = docs[idy].tags[0]\n",
+    "        val = modelDoc2Vec.docvecs.similarity(tag_i,tag_j)\n",
+    "        vals[i][j] = round(1.0-val,4)\n",
+    "        vals[j][i] = round(1.0-val,4)\n",
+    "            \n",
+    "f = open(\"doc2vecDistMatrix.txt\", \"w\")\n",
+    "for i in range(nDocs):\n",
+    "    for j in range(nDocs):\n",
+    "        f.write(\"{0:4.2f}\\t\".format(vals[i][j]))\n",
+    "    f.write(\"\\n\")\n",
+    "f.close()\n",
+    "\n",
+    "distanceMatrix = vals"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 402,
+   "metadata": {
+    "collapsed": true,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "import scipy.spatial.distance as ssd\n",
+    "from scipy.cluster.hierarchy import dendrogram, linkage, fcluster, cophenet\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 403,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[ ward      ] Cophenetic =  0.44\n",
+      "[ median    ] Cophenetic =  0.24\n",
+      "[ average   ] Cophenetic =  0.52\n",
+      "[ single    ] Cophenetic =  0.40\n",
+      "[ complete  ] Cophenetic =  0.43\n"
+     ]
+    }
+   ],
+   "source": [
+    "distArray = ssd.squareform(np.asmatrix(distanceMatrix), checks=False)\n",
+    "methods = [\"ward\", \"median\", \"average\", \"single\", \"complete\"]\n",
+    "bestVal = 0.0\n",
+    "bestMethod = \" \"\n",
+    "for mm in methods:\n",
+    "    Z = linkage(distArray, method=mm, optimal_ordering=True)\n",
+    "    c, cophDist = cophenet(Z, distArray)\n",
+    "    print(\"[ {0:10s}] Cophenetic = {1:5.2f}\".format(mm,c))\n",
+    "    if c > bestVal:\n",
+    "        bestVal = c\n",
+    "        bestMethod = mm\n",
+    "        \n",
+    "Z = linkage(distArray, method=bestMethod, optimal_ordering=True)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 404,
+   "metadata": {
+    "collapsed": false,
+    "deletable": true,
+    "editable": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/png": "iVBORw0KGgoAAAANSUhEUgAABZsAAAJPCAYAAAAaBgreAAAABHNCSVQICAgIfAhkiAAAAAlwSFlz\nAAALEgAACxIB0t1+/AAAIABJREFUeJzs3XuQ7Gdd5/HPlxwQNCFBckTJhaDiJV5olyMXC5dxvQVc\nN7jrBQa1QK0xCtZaLiriFovuynpZFdRgamRTrMqY9QKa1WDcLR1ZBdYkMoABozEKJ+GWCwQTFYh5\n9o/+HU/neM5Mn/N0T/fMeb2qpuZM92/690zPFBXe/e3nV621AAAAAABAjwctegEAAAAAAOx9YjMA\nAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA0E1sBgDYI6rqxqpaWYJ1XFRVraoO\nnOD+F1fVq+Z5jim+/6VV9cs9a5iVqrqnqj510etYdlW1WVXftuh1AABw6sRmAIAlUFV/U1Vfdsxt\nz62qPzrydWvtc1prm7u+uJPUWntZa23u0bCqVqvq+iHmvreqXl9VT53h43cF7yNaa2e21m6Z1bqO\nGIL6x4af/0NV9caqesqsz3MS63luVf3jsJ4PV9Vbq+pfL2o9AADsPrEZAGCfO5VYWlVnzGMts1JV\n35Pk5UleluRRSS5McnmSf7PIdU3qjdRT+p+ttTOTHEzyR0leW1W1oLUkyZuG9ZyT5JVJrqqqc3bp\n3AAALJjYDACwR0xOP1fVg6rqRVX1V1V1Z1X9alV94nDfkYncb62qdyf5/eH2X6uq91XV3VX1hqr6\nnInHfnVV/XxVXVNV9yb5kqp6WFX9ZFW9a/ieP6qqh00s6TlV9e6quqOqfnDisR6whUVVPXWYuv1Q\nVR2uqucOt39VVb1lmII9XFUvnfJ5ODvJDyd5fmvtta21e1trH2ut/XZr7fuOc/xKVd26zXP5xGFC\n+sNV9f6q+qnhsDcMnz80TOs+ZTj+W6rqnVX1waq6tqoeM/G4raqeX1V/meQvJ2779Inn+fKq+p2q\n+tuq+n9V9WkT3/8VVXXT8Hy/sqr+cJqtJVprH0vyP5J8cpJHDlPGf1xVP11VdyZ56XZrr7GfrqoP\nDM/D26vqc4f7nlFV7xjWe1tVvXCK9dyf5JeSfEKSx038fE+e+Ft4a22zLcwOz/Mrhr+ZD1fVDVX1\nxRP3nej3ue35h+fsluHn/Ouqes5OPycAAA8kNgMA7E3fleSZSZ6W5NFJPpjxZO+kpyX57CRfOXz9\n+ozD3ycl+dMkrznm+NUkP5LkrIynZP9bkick+aIkn5jk+5LcP3H8U5N8ZpIvTfKSqvrsYxc5BMLX\nJ/nZjKdvR0m2hrvvTfLNGU/BflWS76iqZ07xsz8lyUOTvG6KY6fxiiSvaK09PMmnJfnV4fZ/OXw+\nZ9gK401VdWmSFyf5txn/PP83ya8c83jPTPKkJBef4HzPSvJDSR6R5OaMn/NU1blJfj3JDyR5ZJKb\nMn7ud1RVH5fkuUkOt9buGG5+UpJbMp78/pEd1v4Vw8/7GUnOTvL1Se4c7vvvSb69tXZWks/N8OLF\nDus5I8nzknwsybuG285L8jtJ/kvGf08vTPIbVXXwON+/0/N8XcZ/S5+YZCPJr1XVQ4f7jvv73O78\nVfUJSX4mydOHn/OLcvTvFACAKYnNAADL4zeHicsPVdWHMt6G4EQuS/KDrbVbW2sfyXhy9Wvrgdsl\nvHSY+v37JGmtXdla+9uJ4x8/TAkf8VuttT8eplI/muRbkvz71tptrbV/bK29cfjeI36otfb3rbW3\nJnlrkscfZ52rSf5Pa+1XhunjO1trW8N6Nltrb2+t3d9ae1vGMfFpUzxPj0xyR2vtvimOncbHknx6\nVZ3bWruntfbmbY69LMl/ba29czj/y5KMJqduh/vvOvK8H8frWmt/Mnz/azKOpknyjCQ3DtPa92Uc\nP9+3w9q/fvhbOZzxCwNfM3Hfe1prP9tau29Yy3Zr/1jGLzJ8VpIajnnvxPNzcVU9vLX2wdban26z\nnicP6/mHjF+s+MbW2geG+74xyTWttWuG3/n/TnL98HMfa9vnubX2y8Pf0n2ttZ9M8nEZv/BxZL3H\n+33udP77k3xuVT2stfbe1tqN2/ycAAAch9gMALA8ntlaO+fIR5Lv3ObYxyR53USYfmeSf8x4ivWI\nw0f+UVVnVNWP1njbjQ8n+ZvhrnOPd/xw+0OT/NU2a5gMoX+X5MzjHHPBiR6jqp5UVX9QVbdX1d0Z\nB8Zzj3fsMe5Mcm7Nbh/ib814ovfPq+q62v6ido9J8oqJ5/2uJJXkvIljDh/3O4860fP26Mnvba21\nJA/Y/uM4fnX4e/mk1tq/aq3dsM06Trj21trvJ/m5jKfjP1BV61X18OH7/l3GQfZdw7Ye212E8M3D\n3+4jklyd5Isn7ntMkq875gWVpyb5lOM8zrbPc1W9cNhi4+7h/rNz9G/nRL/PE56/tXZvkm/I+G/w\nvTXe5uSztvk5AQA4DrEZAGBvOpzxW/7Pmfh4aGvttolj2sS/V5NcmuTLMg5zFw231wmOvyPj6dRP\nS5/D2zzGRsZB8oLW2tlJrjhmPSfypiQfyXi7imncm+Tjj3wxbPHwT1s3tNb+srX27Iy3F/mxJL8+\nbKvQjn2gjH+ebz/meX9Ya+2NE8cc7/um8d4k50+ssya/PgXHrmPbtbfWfqa19oSMt//4jCTfO9x+\nXWvt0oyfn9/M0W1GTnzi1u5J8h1JvqmqvmDi/L90zPk/obX2o8d5iBOuddif+fsy3urjEUPcvjvD\n3842v89tz99au7a19uUZx+8/T/ILOz7DAAA8gNgMALA3XZHxPrxHLvB2cNjn9kTOyjjQ3plxeH3Z\ndg8+bKVxZZKfqqpHD5PRTxn2Bj4Zr0nyZVX19VV1oKoeWVVHto04K8ldrbV/qKonZhzEd9RauzvJ\nS5JcXlXPrKqPr6oHV9XTq+rHj/Mtf5HkoTW+IOGDk/zHjLddSJJU1TdW1cHhZ/7QcPP9SW4fPn/q\nxGNdkeQHari4YlWdXVVfN+VzsZPfSfJ5w890IMnzM77g36yccO1V9YXDpPmDM47z/5Dk/qp6SFU9\np6rOHi5C+OE8cN/uE2qt3ZXkVRn/rpLkl5N8dVV95fD39NAaX7zxeEF9u+f5rCT3Zfz7OVBVL0ly\nZAp7u9/nCc9fVY+qqkuHKP2RJPdM+3MCAHCU2AwAsDe9IuOp4N+rqr9N8uaMLwh3Ir+Y8YXabkvy\njuH4nbwwydszvhjbXRlPiZ7Ufz+21t6d8RYM/2F4jK0c3dv5O5P88LD+l2SKidmJx/3JJN+TcTi+\nPeOp1RdkPHl77LF3D+d6VcY//7154PYUlyS5saruyfh5fdawF/XfZXzxvj8etl14cmvtdRk/D1cN\n25H8WZKnT7vuHX6mO5J8XZIfz/hFgYsz3lP4I9t930k8/nZrf3jGk7wfzPjv5M4kPzHc901J/mb4\nnsuSPOckTvvyJM+oqs9vrR3OeLr+xTn6O/veHOdvaoe1XpvkdzN+EeFdGYfxyS1DTvT73O78D8r4\n7+k9Gf+dPi3jyWwAAE5CjbeCAwAAlklVPSjjKP6c1tofLHo9AACwE5PNAACwJIYtHs4Ztit5ccb7\nEE8zhQ4AAAsnNgMAwPJ4SpK/yvgCjV+d5Jmttb9f7JIAAGA6ttEAAAAAAKCbyWYAAAAAALqJzQAA\nAAAAdDuwqBOfe+657aKLLlrU6QEAAAAAmMINN9xwR2vt4E7HLSw2X3TRRbn++usXdXoAAAAAAKZQ\nVe+a5jjbaAAAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0A\nAAAAAHQTmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb2AwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYA\nAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMA\nAAAAAN3EZgAAAAAAuonNAAAAAAB0O7DoBZxO1teTjY1FrwIAAJiX1dVkbW3RqwAAWAyTzbtoYyPZ\n2lr0KgAAgHnY2jJcAgCc3kw277LRKNncXPQqAACAWVtZWfQKAAAWy2QzAAAAAADdxGYAAAAAALqJ\nzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMAAAAAAN3E\nZgAAAAAAuonNAAAAAAB0E5sBAAAAAOi2Y2yuqiur6gNV9WcnuL+q6meq6uaqeltV/YvZLxMAAAAA\ngGU2zWTzq5Ncss39T0/yuOFjLcnP9y8LAAAAAIC9ZMfY3Fp7Q5K7tjnk0iS/2MbenOScqvqUWS0Q\nAAAAAIDlN4s9m89Lcnji61uH2wAAAAAAOE3s6gUCq2qtqq6vqutvv/323Tw1AAAAAABzNIvYfFuS\nCya+Pn+47Z9pra231g611g4dPHhwBqcGAAAAAGAZzCI2X53km2vsyUnubq29dwaPCwAAAADAHnFg\npwOq6leSrCQ5t6puTfKfkjw4SVprVyS5Jskzktyc5O+SPG9eiwUAAAAAYDntGJtba8/e4f6W5Pkz\nWxEAAAAAAHvOrl4gEAAAAACA/UlsBgAAAACgm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA3Q4segEA\ncDpbX082Nha9CgBmYWtr/HllZaHLAGBGVleTtbVFrwL2FpPNALBAGxtH4wQAe9toNP4AYO/b2jIU\nAqfCZDMALNholGxuLnoVAADAEd6lAqdGbAZmzrYAMD1vuYaT4+2sAACwvGyjAcycbQFget5yDdPz\ndlYAAFhuJpuBubAtAACz5h0AAACw3Ew2AwAAAADQTWwGAAAAAKCb2AwAAAAAQDexGQAAAACAbmIz\nAAAAAADdxGYAAAAAALodWPQC5mV9PdnYWPQqHmhra/x5ZWWhyziu1dVkbW3RqwAAAAAA9qp9G5s3\nNsZxdzRa9EqOWqa1TDoSwcVmAAAAmL1lHIhje8s8MMiJGaZcvH0bm5Nx3N3cXPQqlp//4QQAAID5\nWcaBOLbnd7X3GKZcDvs6NgMAe5PpH47HhBEnYooJ2AsMxMF8+W/E5eACgQDA0jky/QOTRiNTRvxz\nW1tenAIAWBYmmwGApWT6B5iGKSYAgOVhshkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQT\nmwEAAAAA6CY2AwAAAADQ7cCiFwAAAADsnvX1ZGNj0as4vWxtjT+vrCx0Gaed1dVkbW3Rq4DTi8lm\nAAAAOI1sbByNn+yO0Wj8we7Z2vKiCiyCyWYAAAA4zYxGyebmolcB82OKHBbDZDMAAAAAAN3EZgAA\nAAAAutlGAwAA9rH9fiGw0+GiWy5wBQDsFSabAQBgH9vvFwLb7xfdcoErAGAvMdkMAAD7nAuB7V37\neWIbANh/TDYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMAAAAAAN3EZgAAAAAAuonN\nAAAAAAB0E5sBAAAAAOgmNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA3cRm\nAAAAAAC6ic0AAAAAAHQTmwEAAAAA6HZg0QsAgNPJ+nqysbHoVSy/ra3x55WVhS5jz1hdTdbWFr0K\nAADgdGeyGQB20cbG0ZDKiY1G4w92trXlBQwAAGA5mGyGJbJfJh7300SiaUHmYTRKNjcXvQr2i/3w\nv7UAAMD+YLIZlsh+mXjcLxOJpgUBAAAApmeyGZaMicflYVoQAAAAYHommwEAAAAA6CY2AwAAAADQ\nzTYaAAAAMAUX9F4uLuYNsHxMNgMAAMAUXNB7ebiYN8ByMtm85HbjlfPdelXbq84AAMBe54Ley2Gv\nT2UD7Fdi85I78sr5PF913o1XtI8EbbEZANjPlvEt9sv6dnmDCAAA+4/YvAfsh1fOl+3/3AAAzMNu\nDAqcrGVayxEGEQAA9iexGQAAZmg/DArMm0EEAID9yQUCAQAAAADoJjYDAAAAANDNNhoA7AnLeNGt\nU7GsF+o6WS7sBQAAwLFMNgOwJxy56NZeNxot58W6TsbW1v4I/wAAAMyWyWYA9gwX3VoOe30qGwAA\ngPkw2QwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYAAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAA\nANBNbAYAAAAAoJvYDAAAAABAtwOLXgAAAAD0Wl9PNjbme46trfHnlZX5nmd1NVlbm+85AGAeTDYD\nAACw521sHI3B8zIajT/maWtr/tEcAObFZDMAAAD7wmiUbG4uehV95j01DTALu/FukpO1W+8+OVmn\n27tVTDYDAAAAAFPbjXeTnKzdePfJyTod361ishkAAAAAOCn74d0k87ZsU9a7wWQzAAAAAADdxGYA\nAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANDtwKIXAAAAsBetrycbG/M9x9bW+PO8r2a/upqs\nrc33HADA/jfVZHNVXVJVN1XVzVX1ouPcf3ZV/a+qemtV3VhVz5v9UgEAAJbHxsbRGDwvo9H4Y562\ntuYfzQGA08OOk81VdUaSy5N8eZJbk1xXVVe31t4xcdjzk7yjtfbVVXUwyU1V9ZrW2kfnsmpYkHlP\nr5hcAQDYW0ajZHNz0avoM+//9gQATh/TTDY/McnNrbVbhnh8VZJLjzmmJTmrqirJmUnuSnLfTFcK\nS2De0ysmVwAAAADYq6bZs/m8JIcnvr41yZOOOebnklyd5D1JzkryDa21+2eyQlgye316xeQKAAAA\ns7Qbe9ifrN165/Cp8G5j9rOp9myewlcm2Ury6CSjJD9XVQ8/9qCqWquq66vq+ttvv31GpwYAAABg\nUXZjD/uTtRvvHD4V3m3MfjfNZPNtSS6Y+Pr84bZJz0vyo621luTmqvrrJJ+V5E8mD2qtrSdZT5JD\nhw61U100AAAAAMtjr78LeLcs46Q1zNI0k83XJXlcVT22qh6S5FkZb5kx6d1JvjRJqupRST4zyS2z\nXCgAAAAAAMtrx8nm1tp9VfWCJNcmOSPJla21G6vqsuH+K5L85ySvrqq3J6kk399au2OO6wYAAAAA\nYIlMs41GWmvXJLnmmNuumPj3e5J8xWyXBgAAAADAXjFVbAaA7ezG1ad362rSrgwNAAAAp2aaPZsB\nYFu7cfXp3biatCtDAwAAwKkz2QzATOyHq0+7MjQAAACcOrEZAAAAYJ+y5R2wm2yjAQAAALBP2fIO\n2E0mmwEAAAD2MVveAbvFZDMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA0E1s\nBgAAAACg24FFLwAAAADYX9bXk42N+T3+1tb488rK/M6RJKurydrafM8BsJ+YbAYAAABmamPjaBCe\nh9Fo/DFPW1vzDeYA+5HJZgAAAGDmRqNkc3PRqzh1856aBtiPTDYDAAAAANBNbAYAAAAAoJvYDAAA\nAABAN7EZAAAAAIBuYjMAAAAAAN3EZgAAAAAAuh1Y9AIAAGA3rK8nGxvzPcfW1vjzysp8z7O6mqyt\nzfccAABwskw2AwBwWtjYOBqD52U0Gn/M09bW/KM5AACcCpPNAACcNkajZHNz0avoM++paQAAOFUm\nmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCbPZsBYJ9ZX5/vxcOOXGBt3vvGrq4ma2vzPQcAAACzY7IZ\nAPaZjY2jQXgeRqPxxzxtbc03mAMAADB7JpsBYB8ajZLNzUWv4tTNe2oaAACA2TPZDAAAAABAN7EZ\nAAAAAIBuYjMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOh2YNELAADYt9bXk42N+Z5j6+Xj\nzyvfPd/zrK4ma2vzPQcAALCnic0AAPOysZFsbSWj0dxOsTmac2ROxj9DIjYDAADbEpsBAOZpNEo2\nNxe9ij4rK4teAQAAsAfYsxkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQTmwEAAAAA6CY2\nAwAAAADQTWwGAAAAAKCb2AwAAAAAQLcDi14AwKlYv2E9G2/fmOs5tt738iTJyqu/e67nWf281aw9\nYW2u5wAAAACYN7EZ2JM23r6RrfdtZfTJo7mdY/Si+UbmJNl631aSiM0AAADAnic2A3vW6JNH2Xzu\n5qKX0WXl1SuLXgIAAADATNizGQAAAACAbmIzAAAAAADdxGYAAAAAALqJzQAAAAAAdBObAQAAAADo\nJjYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuBxa9AAAAAACA3bT+nvdk4/3vn+s5tu75\n9CTJyltunut5Vh/1qKw9+tFzPce0xGYAAAAA4LSy8f73Z+ueezI688y5nWP0C/ONzEmydc89SSI2\nAwAAAAAsyujMM7P5BV+w6GV0WXnLWxa9hAewZzMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAA\nAOgmNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAA\nAHQTmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb2AwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYAAAAA\nALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMAAAAA\nAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA0G2q2FxVl1TVTVV1c1W96ATHrFTVVlXd\nWFV/ONtlAgAAAACwzA7sdEBVnZHk8iRfnuTWJNdV1dWttXdMHHNOklcmuaS19u6q+qR5LRgAAAAA\ngOUzzWTzE5Pc3Fq7pbX20SRXJbn0mGNWk7y2tfbuJGmtfWC2ywQAAAAAYJlNE5vPS3J44utbh9sm\nfUaSR1TVZlXdUFXfPKsFAgAAAACw/HbcRuMkHucJSb40ycOSvKmq3txa+4vJg6pqLclaklx44YUz\nOjUAAAAAAIs2zWTzbUkumPj6/OG2Sbcmuba1dm9r7Y4kb0jy+GMfqLW23lo71Fo7dPDgwVNdMwAA\nAAAAS2aa2HxdksdV1WOr6iFJnpXk6mOO+a0kT62qA1X18UmelOSds10qAAAAAADLasdtNFpr91XV\nC5Jcm+SMJFe21m6sqsuG+69orb2zqn43yduS3J/kVa21P5vnwgEAAAAAWB5T7dncWrsmyTXH3HbF\nMV//RJKfmN3SAAAAAADYK6bZRgMAAAAAALYlNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAA\ngG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQTmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb2AwAAAAA\nQDexGQAAAACAbmIzAAAAAADdxGYAAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAA\noJvYDAAAAABAN7EZAAAAAIBuYjMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA\n0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQTmwEAAAAA\n6CY2AwAAAADQTWwGAAAAAKCb2AwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYAAAAAALqJzQAAAAAA\ndBObAQAAAADoJjYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMAAAAAAN3EZgAAAAAA\nuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA\n3cRmAAAAAAC6ic0AAAAAAHQTmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb2AwAAAAAQDexGQAAAACA\nbmIzAAAAAADdxGYAAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAAoJvYDAAAAABA\nN7EZAAAAAIBuYjMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA0E1sBgAAAACg\nm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQTmwEAAAAA6CY2AwAAAADQ\nTWwGAAAAAKCb2AwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYAAAAAALqJzQAAAAAAdBObAQAAAADo\nJjYDAAAAANBNbAYAAAAAoNtUsbmqLqmqm6rq5qp60TbHfWFV3VdVXzu7JQIAAAAAsOx2jM1VdUaS\ny5M8PcnFSZ5dVRef4LgfS/J7s14kAAAAAADLbZrJ5icmubm1dktr7aNJrkpy6XGO+64kv5HkAzNc\nHwAAAAAAe8A0sfm8JIcnvr51uO2fVNV5Sb4myc/PbmkAAAAAAOwVs7pA4MuTfH9r7f7tDqqqtaq6\nvqquv/3222d0agAAAAAAFu3AFMfcluSCia/PH26bdCjJVVWVJOcmeUZV3dda+83Jg1pr60nWk+TQ\noUPtVBcNAAAAAMBymSY2X5fkcVX12Iwj87OSrE4e0Fp77JF/V9Wrk/z2saEZAAAAAID9a8fY3Fq7\nr6pekOTaJGckubK1dmNVXTbcf8Wc1wgAAAAAwJKbZrI5rbVrklxzzG3Hjcyttef2LwsAAAAAgL1k\nVhcIBAAAAADgNCY2AwAAAADQTWwGAAAAAKCb2AwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYAAAAA\nALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMAAAAA\nAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAA\ngG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQTmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb2AwAAAAA\nQDexGQAAAACAbmIzAAAAAADdxGYAAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAA\noJvYDAAgYOpcAAARWElEQVQAAABAN7EZAAAAAIBuYjMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sB\nAAAAAOgmNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0A\nAAAAAHQTmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb2AwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYA\nAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMA\nAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkA\nAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQTmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb2AwA\nAAAAQDexGQAAAACAbmIzAAAAAADdxGYAAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYA\nAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMA\nAAAA0E1sBgAAAACg21SxuaouqaqbqurmqnrRce5/TlW9rareXlVvrKrHz36pAAAAAAAsqx1jc1Wd\nkeTyJE9PcnGSZ1fVxccc9tdJntZa+7wk/znJ+qwXCgAAAADA8ppmsvmJSW5urd3SWvtokquSXDp5\nQGvtja21Dw5fvjnJ+bNdJgAAAAAAy2ya2HxeksMTX9863HYi35rk9T2LAgAAAABgbzkwywerqi/J\nODY/9QT3ryVZS5ILL7xwlqcGAAAAAGCBpplsvi3JBRNfnz/c9gBV9flJXpXk0tbancd7oNbaemvt\nUGvt0MGDB09lvQAAAAAALKFpYvN1SR5XVY+tqockeVaSqycPqKoLk7w2yTe11v5i9ssEAAAAAGCZ\n7biNRmvtvqp6QZJrk5yR5MrW2o1Vddlw/xVJXpLkkUleWVVJcl9r7dD8lg0AAAAAwDKZas/m1to1\nSa455rYrJv79bUm+bbZLAwAAAABgr5hmGw0AAAAAANiW2AwAAAAAQDexGQAAAACAbmIzAAAAAADd\nxGYAAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBNbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBu\nYjMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgmNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3\nsRkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQTmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb\n2AwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYAAAAAALqJzQAAAAAAdBObAQAAAADoJjYDAAAAANBN\nbAYAAAAAoJvYDAAAAABAN7EZAAAAAIBuYjMAAAAAAN3EZgAAAAAAuonNAAAAAAB0E5sBAAAAAOgm\nNgMAAAAA0E1sBgAAAACgm9gMAAAAAEA3sRkAAAAAgG5iMwAAAAAA3cRmAAAAAAC6ic0AAAAAAHQT\nmwEAAAAA6CY2AwAAAADQTWwGAAAAAKCb2AwAAAAAQDexGQAAAACAbmIzAAAAAADdxGYAAAAAALqJ\nzQAAAAAAdBObAQD+f3t3H3RbWdZx/Pvr8KIWyWSJJE2Aw6TIiyAiWUKIBofBiBoqEyvMYZh0Ssui\nmmqKf3SaQSdLUTIHAR0rPcJJDXmHHCVxIgEzCjFBZUSIlwwUD179sdbT2Tydl72fdc5Ze919PzPM\ns5919sxzXex9r3Xd11rrXpIkSZKkwWw2S5IkSZIkSZIGs9ksSZIkSZIkSRrMZrMkSZIkSZIkaTCb\nzZIkSZIkSZKkwWw2S5IkSZIkSZIGs9ksSZIkSZIkSRrMZrMkSZIkSZIkaTCbzZIkSZIkSZKkwWw2\nS5IkSZIkSZIGs9ksSZIkSZIkSRrMZrMkSZIkSZIkaTCbzZIkSZIkSZKkwWw2S5IkSZIkSZIGs9ks\nSZIkSZIkSRrMZrMkSZIkSZIkaTCbzZIkSZIkSZKkwWw2S5IkSZIkSZIGs9ksSZIkSZIkSRrMZrMk\nSZIkSZIkaTCbzZIkSZIkSZKkwWw2S5IkSZIkSZIGs9ksSZIkSZIkSRrMZrMkSZIkSZIkaTCbzZIk\nSZIkSZKkwWw2S5IkSZIkSZIGs9ksSZIkSZIkSRrMZrMkSZIkSZIkaTCbzZIkSZIkSZKkwWw2S5Ik\nSZIkSZIGs9ksSZIkSZIkSRrMZrMkSZIkSZIkaTCbzZIkSZIkSZKkwWw2S5IkSZIkSZIGs9ksSZIk\nSZIkSRrMZrMkSZIkSZIkaTCbzZIkSZIkSZKkweZqNic5KcntSe5I8rtb+PckeVv/77ckOXLHhypJ\nkiRJkiRJWlbbbTYnWQe8HVgPHAy8IsnBq962Hjio/+8s4PwdHKckSZIkSZIkaYnNc2Xz0cAdVXVn\nVT0GfAA4ddV7TgUuqs6NwN5J9t3BsUqSJEmSJEmSltQ8zeZnAnfP/P7lftui75EkSZIkSZIkNWq3\nXfnHkpxFt8wGwDeS3L7z/+bO/gu7hnkslxbyaCEHgJzZRiLN5NFGGuaxRFrIAWgnkUbyaCSNJvJo\nIQcwj2VjHsulhTxayAHMY9mYx/JoIAVgl+Txw/O8aZ5m81eAH5r5fb9+26LvoaouAC6YJzBJkiRJ\nkiRJ0nTMs4zGTcBBSQ5IsgfwC8DGVe/ZCPxSOscAD1XVPTs4VkmSJEmSJEnSktrulc1VtSnJ64CP\nA+uA91TV55Kc3f/7O4GPAScDdwCPAGfuvJAlSZIkSZIkScsmVTV2DJIkSZIkSZKkiZtnGQ1JkiRJ\nkiRJkrbJZrMkSZIkSZIkaTCbzZIkSZIkSZKkwbb7gEBJklZL8lPAVVX1yNixSNo5kjwfuBu4HzgF\neLSqrhg3qrVLcghwCPCFqrpp7Hh2hCQvaCUX7VpJ9q2qe5IEOBV4DvBF4INVtWnc6P5/SnIo8CJg\nb+BrwMer6p5xo1pcf+z4Ubo8HgRurKrPjBuVpB0lyXOBx6vqX2e2vbCq/nHEsAZJ8tqqevvYcSwi\nye7AScD9VfXJJGcATwXeV1UPjhtdQw8ITPLrwEeq6s6xYxmiL/hO4YmFxkenNpFIsg74aVYVGsCl\nUypgk+y9MlCTnEI/SaUrxCczeJIcUVU3J3kycDbwbLoJxTuXYUc0r358nAw8DlxRVd/pt59aVZeN\nGtycknwf8Eq65s0G4LeB7wXeUVVfHDO2RST5KvAlun3Uh4GNVfXAuFEtLsmedPvcf6cbE68GHgUu\nqqpvjhnbUEnOrao/GjuOebVyHN+aJC+vqr8bO455JfkrIMC3gKcDXwEeBp5eVWeNGdsiklxeVScl\neT1wAvBR4MeAL1fV740b3fySbOluxACXV9XLdnU8a9VKfbglE9znXlNVL0nyZ3THvWuA5wFHVdXP\njRvd/Bqq1d8MPBn4LHA88E26eveTVXXRmLEtIslbgT2Bq4CH6GrclwKbquo3xoxtXi3MN1a0MAds\nuVaHSdaH5wH7AN8Gvh94dVV9feWYMm5080nyD8DK8SH9z+cCt1XVseNEtbgkHwZuoqunng98DLgP\n+MWqOnHM2KCtZvOddAfnZwCXAxuq6tZxo1pckncDn6PL5SXAXsB/At+qqjePGdsiklwM3AJczRML\njcOr6owxY1vETCH+JrpBfBndJHW/qjpz3OjmN5PHe4FPsXlC8StVdfK40c0vySV0RcYmuu/Ta6rq\n9okd3K4ALqT7Pp0N/DFd4/lPquonRgtsQUmurarjkxwA/Azwcrqm1GVV9Y5xo5tfkkuBfwLW0U3u\nLqVrqJ1YVaePGdsiktwF3AV8h4kWTQ0dxw/c0mbgwqp68a6OZ62SXF9Vx/Wvb62qQ/vX11bV8eNG\nN7+Z49/1wPEzTYNPVNWPjxze3JI8QteUDU+cIB1WVU8bLbAFNVQftrDPvaqqXrryc2b7VMf41Gv1\nq6vqhJnfr6yql63+fJZdkhu2NAa2tn0ZtTDfWNHCHLChWr2V+vB/x3KSw4C3AW8E/nQq4yPJG4DD\n6f7fX9dv+/uqWj9qYAuaPV4nua2qDlm9fUwtLaPxpao6LclTgPXAOUmeDVxTVb8zcmyLeFZVvaZ/\nfc1K4ZHkSmAyzWZg/6p61aptN/dnkaboRSuTbuDyJNeNGcwaVH+W/hnAu/orPf4tyWtHjmtR+61M\nRpP8JXBhkr8YOaZF7VlV7wdI8rqq2tC/nuSZv/5q7POA85LsQ3cr7pQ8tarOBUhyclW9pX/9inHD\nWtjrgZ+lu5Lo4qraNMGiqZXj+D8DH2RzA2rFASPEMsRsjfj7M69X57XsDk5yEfAsuqvtHu23P2m8\nkNbk88BpVfXQ7Ma+PpySVurDlX3ulcAlE93nvre/yOXuvrl2PXAYMNXlDqZeq9+b5By6kzHHAf/S\nb183Xkhr8pkk76IbGw/TnVA6ga5ZOBUtzDdWtDAHbKVWb6U+XJdkj6p6rKpuSXIacAndCddJqKq3\nJtkD+NUkZwPvHzumNfrvJH8AfDdwf5Lfor9QddywOi01mwGobv3QDwEfSrIb3dXBU3JrkvPZXGhc\n22+f2me1MclHgOvYXGgcB2wcM6g1ODLJDXST1b2r6sH+Vta9xg5sQW8C/obudtXrknyCbm2+DaNG\ntbjvSrJXVf1XVX21v13yArrbRqbirn5yt45uvP853UHhvnHDWtj/OflVVV+j+zymZI+Z178283pS\nk7v+pMWGJOuBi5N8Cth95LDWpIHj+G3AOVX19dmNSf56pHjW6qwk66rq8ZXbO/vC/C0jx7WoF/Y/\n/5DuKjWSfE//+5ScwuZG+awpNTcBLmuhPmxhn1tVFye5GjiR7pbo3YB3V9Vnx41sYUf2JyueM/Fa\n/QzgNOBQuitQV26rf+VoEa1BVf1mkiOAY4CD6O5guKCqbh43soW0MN9Y0cIcsIlanXbqwzfQ3UVy\nL0BVPZDuWT6TucocoKoeA87vTyi9iu7uyqk5nW7N5i8A5wK/THcxxc+PGdSKlpbROHxLxVEm+OCU\nJEcBBwK3r+SU5Oiq+vS4kS0mybHAwXQHt4fp1pM5sCa2cHy6Bwo9XlWf739/Ct1tqzeOG9li+jxe\nDDxAV/jdRHcl/WQ+jyT7Aw+uXmMsybFVdcMoQS2ov7rgeXTrn94H/CTdGe77pravakGSpwE/CHy7\n+odcpHvYwjFVNakr7TLzsI4kx9OtW/npqYzxJIfTNQMn/cCRJLvVFtaenWI9Iu0MSX4AOIpusrpS\nj+w/5fExs8+9ccp5tKKv1Q+Z2txJy6GfbzyT7qFbs/XIMVOb/wEkeRLdOvn7sHmfe8BU9lV9rf7A\nyjJY/bbdgSOmNMb7Cyh+hInXudK8Wmo2t/LglFbyOI/ugUKbmOjC8WAey2Yr4wO6p3VPYny0MsZb\nkQYecgFt5NFCDuAYl7alheM4OM6XiZ+FdrRW6hFoY5/byhhv6XslzWNqSzNsyzfYyoNTRotobVby\nmDXFPF6wauH4v03yxpFjWgvzWC4tjPPZHKDLY2o5tKSVsdFCHi3kAG3sp6SdpZU612P58nCfqx2t\nlXoE2tjntrK/bel7JW1XS83mVh6c0koek184vmcey6WF8dFCDi1pZWy0kEcLOYBjXNqWVsZHK3m0\nwM9CO1or9Qi0MT5ayAHa+l5J29XSMhr70q2r9Niq7VtcO3FZNZTH0cB/VNW9M9vWAadX1QfGi2wx\n5rFcWhgfLeTQkobGxuTzaCEHcIxL29LK+Ggljxb4WWhHa6UegTbGRws5QFvfK2kezTSbJUmSJEmS\nJEnj2dqC8ZIkSZIkSZIkzc1msyRJkiRJkiRpMJvNkiRJkiRJkqTBbDZLkiRJkiRJkgaz2SxJkiRJ\nkiRJGux/ADdfVSY+OdEQAAAAAElFTkSuQmCC\n",
+      "text/plain": [
+       "<matplotlib.figure.Figure at 0x7f8e6a8ff860>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "plt.figure(figsize=(25,10))\n",
+    "plt.title(\"Hierarchical Clustering Press Releases\")\n",
+    "pp= dendrogram(\n",
+    "    Z,\n",
+    "    leaf_rotation=90,\n",
+    "    leaf_font_size=8.,\n",
+    "    show_leaf_counts=True,\n",
+    "    get_leaves=True,\n",
+    "#    truncate_mode=\"level\",\n",
+    "#    p = 5\n",
+    ")\n",
+    "plt.show()\n",
+    "\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.5.1"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
